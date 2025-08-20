@@ -958,7 +958,17 @@ static const struct mips_rtx_cost_data
 		     4            /* memory_latency */
   },
   { /* R4300 */
-    DEFAULT_COSTS
+    COSTS_N_INSNS (3),            /* fp_add */
+    COSTS_N_INSNS (5),            /* fp_mult_sf */
+    COSTS_N_INSNS (8),            /* fp_mult_df */
+    COSTS_N_INSNS (29),           /* fp_div_sf */
+    COSTS_N_INSNS (58),           /* fp_div_df */
+    COSTS_N_INSNS (5),            /* int_mult_si */
+    COSTS_N_INSNS (8),            /* int_mult_di */
+    COSTS_N_INSNS (37),           /* int_div_si */
+    COSTS_N_INSNS (69),           /* int_div_di */
+		     1,           /* branch_cost */
+		     4            /* memory_latency */
   },
   { /* R4600 */
     DEFAULT_COSTS
@@ -14824,7 +14834,7 @@ mips_process_sync_loop (rtx_insn *insn, rtx *operands)
 	  mips_multi_add_insn ("syncw", NULL);
 	  mips_multi_add_insn ("syncw", NULL);
 	}
-      else
+      else if (ISA_HAS_SMP)
 	mips_multi_add_insn ("sync", NULL);
     }
 
@@ -14940,7 +14950,8 @@ mips_process_sync_loop (rtx_insn *insn, rtx *operands)
     mips_multi_add_insn ("li\t%0,1", cmp, NULL);
 
   /* Output the acquire side of the memory barrier.  */
-  if (TARGET_SYNC_AFTER_SC && need_atomic_barrier_p (model, false))
+  if (ISA_HAS_SMP && TARGET_SYNC_AFTER_SC
+      && need_atomic_barrier_p (model, false))
     mips_multi_add_insn ("sync", NULL);
 
   /* Output the exit label, if needed.  */

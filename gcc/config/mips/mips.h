@@ -1379,6 +1379,11 @@ struct mips_cpu_info {
    ? TARGET_LLSC && !TARGET_MIPS16	\
    : ISA_HAS_LL_SC)
 
+#define ISA_HAS_SMP							\
+  (ISA_HAS_SYNC && mips_arch != PROCESSOR_R4100				\
+   && mips_arch != PROCESSOR_R4111 && mips_arch != PROCESSOR_R4120	\
+   && mips_arch != PROCESSOR_R4130 && mips_arch != PROCESSOR_R4300)
+
 #define ISA_HAS_SWAP (TARGET_XLP)
 #define ISA_HAS_LDADD (TARGET_XLP)
 
