@@ -1119,6 +1119,10 @@ mips64r5900-*-elf* | mips64r5900el-*-elf*)
 	tmake_file="$tmake_file mips/t-elf mips/t-crtstuff"
 	extra_parts="$extra_parts crti.o crtn.o"
 	;;
+mips64vr-n64-elf)
+	tmake_file="$tmake_file mips/t-elf mips/t-n64 mips/t-crtstuff"
+	extra_parts="$extra_parts crti.o crtn.o"
+        ;;
 mips64vr-*-elf* | mips64vrel-*-elf*)
 	tmake_file="$tmake_file mips/t-elf mips/t-vr mips/t-crtstuff"
 	extra_parts="$extra_parts crti.o crtn.o"

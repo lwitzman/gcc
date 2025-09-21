@@ -41,6 +41,7 @@ extern int target_flags_explicit;
 #define ABI_64  2
 #define ABI_EABI 3
 #define ABI_O64  4
+#define ABI_U64  5
 
 enum mips_isa {
   MIPS_ISA_MIPS1 = 1,
@@ -681,6 +682,8 @@ struct mips_cpu_info {
 									\
       if (mips_abi == ABI_EABI)						\
 	builtin_define ("__mips_eabi");					\
+      if (mips_abi == ABI_U64)						\
+	builtin_define ("__mips_u64");					\
 									\
       if (TARGET_CACHE_BUILTIN)						\
 	builtin_define ("__GCC_HAVE_BUILTIN_MIPS_CACHE");		\
@@ -788,6 +791,8 @@ struct mips_cpu_info {
 #define MULTILIB_ABI_DEFAULT "mabi=64"
 #elif MIPS_ABI_DEFAULT == ABI_EABI
 #define MULTILIB_ABI_DEFAULT "mabi=eabi"
+#elif MIPS_ABI_DEFAULT == ABI_U64
+#define MULTILIB_ABI_DEFAULT "mabi=u64"
 #endif
 
 #ifndef MULTILIB_DEFAULTS
@@ -978,7 +983,7 @@ struct mips_cpu_info {
 /* True if the ABI can only work with 64-bit integer registers.  We
    generally allow ad-hoc variations for TARGET_SINGLE_FLOAT, but
    otherwise floating-point registers must also be 64-bit.  */
-#define ABI_NEEDS_64BIT_REGS	(TARGET_NEWABI || mips_abi == ABI_O64)
+#define ABI_NEEDS_64BIT_REGS	(TARGET_NEWABI || mips_abi == ABI_O64 || mips_abi == ABI_U64)
 
 /* Likewise for 32-bit regs.  */
 #define ABI_NEEDS_32BIT_REGS	(mips_abi == ABI_32)
@@ -1957,7 +1962,6 @@ FP_ASM_SPEC "\
 #define DSP_ACC_REG_LAST 181
 #define DSP_ACC_REG_NUM (DSP_ACC_REG_LAST - DSP_ACC_REG_FIRST + 1)
 
-#define AT_REGNUM	(GP_REG_FIRST + 1)
 #define HI_REGNUM	(TARGET_BIG_ENDIAN ? MD_REG_FIRST : MD_REG_FIRST + 1)
 #define LO_REGNUM	(TARGET_BIG_ENDIAN ? MD_REG_FIRST + 1 : MD_REG_FIRST)
 
@@ -2468,9 +2472,9 @@ enum reg_class
 
 /* Symbolic macros for the first/last argument registers.  */
 
-#define GP_ARG_FIRST (GP_REG_FIRST + 4)
+#define GP_ARG_FIRST (GP_REG_FIRST + (mips_abi == ABI_U64 ? 2 : 4))
 #define GP_ARG_LAST  (GP_ARG_FIRST + MAX_ARGS_IN_REGISTERS - 1)
-#define FP_ARG_FIRST (FP_REG_FIRST + 12)
+#define FP_ARG_FIRST (mips_abi != ABI_U64 ? (FP_REG_FIRST + 12) : (FP_REG_FIRST + 0))
 #define FP_ARG_LAST  (FP_ARG_FIRST + MAX_ARGS_IN_REGISTERS - 1)
 
 /* True if MODE is vector and supported in a MSA vector register.  */
@@ -3295,6 +3299,11 @@ struct GTY(())  mips_frame_info {
 
   /* Likewise doubleword accumulator X ($acX).  */
   unsigned int acc_mask;
+
+  /* Use library calls for u64 register save/restore.  */
+  bool gpr_libcall_p;
+  bool fpr_libcall_p;
+  bool gpr_includes_fp_p;
 
   /* The number of GPRs, FPRs, doubleword accumulators and COP0
      registers saved.  */

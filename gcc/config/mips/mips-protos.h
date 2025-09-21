@@ -164,11 +164,15 @@ struct mips16e_save_restore_info;
 	A sibcall or sibcall_value pattern.
 
    MIPS_CALL_EPILOGUE
-	A call inserted in the epilogue.  */
+	A call inserted in the epilogue.
+
+   MIPS_CALL_EPILOGUE
+	A sibcall inserted in the epilogue.  */
 enum mips_call_type {
   MIPS_CALL_NORMAL,
   MIPS_CALL_SIBCALL,
-  MIPS_CALL_EPILOGUE
+  MIPS_CALL_EPILOGUE,
+  MIPS_CALL_EPILOGUE_SIBCALL
 };
 
 /* Controls the conditions under which certain instructions are split.
@@ -282,7 +286,7 @@ extern enum mips_loadgp_style mips_current_loadgp_style (void);
 extern void mips_emit_save_slot_move (rtx, rtx, rtx);
 extern void mips_expand_prologue (void);
 extern void mips_expand_before_return (void);
-extern void mips_expand_epilogue (bool);
+extern void mips_expand_epilogue (rtx_call_insn *);
 extern bool mips_can_use_return_insn (void);
 
 extern bool mips_const_vector_same_val_p (rtx, machine_mode);
@@ -372,6 +376,7 @@ extern bool m16_based_address_p (rtx, machine_mode,
 extern rtx mips_expand_thread_pointer (rtx);
 extern void mips16_expand_get_fcsr (rtx);
 extern void mips16_expand_set_fcsr (rtx);
+extern void mips_expand_save_restore_libcall (const char *, rtx, bool);
 
 extern bool mips_eh_uses (unsigned int);
 extern bool mips_epilogue_uses (unsigned int);

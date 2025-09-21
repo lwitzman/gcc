@@ -1185,7 +1185,8 @@ static const struct mips_rtx_cost_data
   }
 };
 
-static rtx mips_find_pic_call_symbol (rtx_insn *, rtx, bool);
+static rtx mips_find_pic_call_symbol (const rtx_insn *, rtx, bool);
+static rtx mips_find_call_symbol (const rtx_insn *insn);
 static int mips_register_move_cost (machine_mode, reg_class_t,
 				    reg_class_t);
 static unsigned int mips_function_arg_boundary (machine_mode, const_tree);
@@ -2277,6 +2278,24 @@ mips_use_pic_fn_addr_reg_p (const_rtx x)
     }
 
   return true;
+}
+
+/* Return true if the current function calls the save/restore handlers
+ * in the prologue/epilogue. */
+
+static bool
+mips_uses_save_restore_libcalls_p ()
+{
+  const struct mips_frame_info *frame;
+
+  if (!TARGET_SAVE_RESTORE || TARGET_MIPS16 || TARGET_MICROMIPS)
+    return false;
+
+  if (cfun->machine->is_naked)
+    return false;
+
+  frame = &cfun->machine->frame;
+  return frame->gpr_libcall_p || frame->fpr_libcall_p;
 }
 
 /* Return the method that should be used to access SYMBOL_REF or
@@ -3723,7 +3742,9 @@ mips_expand_thread_pointer (rtx tp)
 {
   rtx fn;
 
-  if (TARGET_MIPS16)
+  if (mips_abi == ABI_U64)
+    mips_emit_move (tp, gen_rtx_REG (Pmode, K1_REG_NUM));
+  else if (TARGET_MIPS16)
     {
       if (!mips16_rdhwr_stub)
 	mips16_rdhwr_stub = new mips16_rdhwr_one_only_stub ();
@@ -3738,6 +3759,9 @@ mips_expand_thread_pointer (rtx tp)
 static rtx
 mips_get_tp (void)
 {
+  if (mips_abi == ABI_U64)
+    return gen_rtx_REG (Pmode, K1_REG_NUM);
+
   return mips_expand_thread_pointer (gen_reg_rtx (Pmode));
 }
 
@@ -6306,6 +6330,85 @@ mips_get_arg_info (struct mips_arg_info *info, const CUMULATIVE_ARGS *cum,
 	}
       break;
 
+    case ABI_U64:
+      {
+	if (!named || !TARGET_HARD_FLOAT)
+	  {
+	    info->fpr_p = false;
+	    break;
+	  }
+
+	  if (type != 0
+	      && TREE_CODE (type) == RECORD_TYPE
+	      && TYPE_SIZE_UNIT (type)
+	      && tree_fits_uhwi_p (TYPE_SIZE_UNIT (type)))
+	    {
+	      tree field;
+	      HOST_WIDE_INT fpos, fprec;
+	      HOST_WIDE_INT bitpos = 0;
+	      unsigned int num_floats = 0;
+
+	      for (field = TYPE_FIELDS (type); field;
+		   field = DECL_CHAIN (field))
+		{
+		  if (TREE_CODE (field) == FIELD_DECL)
+		    {
+		      if (DECL_FIELD_CXX_ZERO_WIDTH_BIT_FIELD (field))
+			continue;
+
+		      if ((SCALAR_FLOAT_TYPE_P (TREE_TYPE (field))
+			   || COMPLEX_FLOAT_TYPE_P (TREE_TYPE (field)))
+			  && tree_fits_shwi_p (bit_position (field)))
+			{
+			  fpos = int_bit_position (field);
+			  fprec = TYPE_PRECISION (TREE_TYPE (field));
+
+			  if (fpos % fprec == 0 && fpos == bitpos)
+			    {
+			      if (COMPLEX_FLOAT_TYPE_P (TREE_TYPE (field)))
+				num_floats += 2;
+			      else
+				num_floats += 1;
+			      bitpos += fprec;
+			      continue;
+			    }
+			}
+		    }
+
+		  num_floats = 0;
+		  break;
+		}
+
+	      if (num_floats > 0
+		  && cum->num_fprs + num_floats <= MAX_ARGS_IN_REGISTERS)
+		{
+		  num_words = num_floats;
+		  info->fpr_p = true;
+		}
+	      else
+		info->fpr_p = false;
+	    }
+	  else
+	    {
+	      info->fpr_p = (type == 0 || FLOAT_TYPE_P (type))
+			     && (GET_MODE_CLASS (mode) == MODE_FLOAT
+				 || GET_MODE_CLASS (mode) == MODE_COMPLEX_FLOAT
+				 || mode == V2SFmode)
+			     && GET_MODE_UNIT_SIZE (mode) <= UNITS_PER_FPVALUE;
+
+	      if (info->fpr_p
+		  && GET_MODE_CLASS (mode) == MODE_COMPLEX_FLOAT
+		  && GET_MODE_UNIT_SIZE (mode) < UNITS_PER_FPVALUE)
+		{
+		  if (cum->num_fprs >= MAX_ARGS_IN_REGISTERS - 1)
+		    info->fpr_p = false;
+		  else
+		    num_words = 2;
+		}
+	    }
+	  break;
+	}
+
     default:
       gcc_unreachable ();
     }
@@ -6317,18 +6420,27 @@ mips_get_arg_info (struct mips_arg_info *info, const CUMULATIVE_ARGS *cum,
   /* Set REG_OFFSET to the register count we're interested in.
      The EABI allocates the floating-point registers separately,
      but the other ABIs allocate them like integer registers.  */
-  info->reg_offset = (mips_abi == ABI_EABI && info->fpr_p
+  info->reg_offset = ((mips_abi == ABI_EABI || mips_abi == ABI_U64)
+			&& info->fpr_p
 		      ? cum->num_fprs
 		      : cum->num_gprs);
 
   /* Advance to an even register if the argument is doubleword-aligned.  */
-  if (doubleword_aligned_p)
+  if (doubleword_aligned_p && (mips_abi != ABI_U64 || !info->fpr_p))
     info->reg_offset += info->reg_offset & 1;
 
   /* Work out the offset of a stack argument.  */
   info->stack_offset = cum->stack_words;
   if (doubleword_aligned_p)
     info->stack_offset += info->stack_offset & 1;
+
+  if (mips_abi == ABI_U64 && !named)
+    {
+      info->reg_offset = MAX_ARGS_IN_REGISTERS;
+      info->reg_words = 0;
+      info->stack_words = num_words;
+      return;
+    }
 
   max_regs = MAX_ARGS_IN_REGISTERS - info->reg_offset;
 
@@ -6370,6 +6482,9 @@ mips_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
   struct mips_arg_info info;
+
+  if (mips_abi == ABI_U64 && !arg.named)
+    return NULL;
 
   /* We will be called with an end marker after the last argument
      has been seen.  Whatever we return will be passed to the call expander.
@@ -6492,10 +6607,47 @@ mips_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
 	}
     }
 
+  if (mips_abi == ABI_U64 && info.fpr_p
+      && arg.type != 0 && TREE_CODE (arg.type) == RECORD_TYPE)
+    {
+      unsigned int i;
+      rtx ret, reg;
+      HOST_WIDE_INT bytepos;
+      tree field;
+      machine_mode fmode;
+
+      ret = gen_rtx_PARALLEL (arg.mode, rtvec_alloc (info.reg_words));
+
+      field = TYPE_FIELDS (arg.type);
+      for (i = 0; i < info.reg_words; i++)
+	{
+	  bytepos = int_byte_position (field);
+	  fmode = TYPE_MODE (TREE_TYPE (field));
+
+	  if (COMPLEX_FLOAT_TYPE_P (TREE_TYPE (field)))
+	    {
+	      fmode = GET_MODE_INNER (fmode);
+	      reg = gen_rtx_REG (fmode, FP_ARG_FIRST + info.reg_offset + i);
+
+	      XVECEXP (ret, 0, i++)
+		= gen_rtx_EXPR_LIST (VOIDmode, reg, GEN_INT (bytepos));
+	      bytepos += GET_MODE_SIZE (fmode);
+	    }
+
+	  reg = gen_rtx_REG (fmode, FP_ARG_FIRST + info.reg_offset + i);
+
+	  XVECEXP (ret, 0, i)
+	    = gen_rtx_EXPR_LIST (VOIDmode, reg, GEN_INT (bytepos));
+
+	  field = DECL_CHAIN (field);
+	}
+      return ret;
+    }
+
   /* Handle the n32/n64 conventions for passing complex floating-point
      arguments in FPR pairs.  The real part goes in the lower register
      and the imaginary part goes in the upper register.  */
-  if (TARGET_NEWABI
+  if ((TARGET_NEWABI || mips_abi == ABI_U64)
       && info.fpr_p
       && GET_MODE_CLASS (arg.mode) == MODE_COMPLEX_FLOAT)
     {
@@ -6553,10 +6705,10 @@ mips_function_arg_advance (cumulative_args_t cum_v,
      num_gprs to MAX_ARGS_IN_REGISTERS if a doubleword-aligned
      argument required us to skip the final GPR and pass the whole
      argument on the stack.  */
-  if (mips_abi != ABI_EABI || !info.fpr_p)
+  if ((mips_abi != ABI_EABI && mips_abi != ABI_U64) || !info.fpr_p)
     cum->num_gprs = info.reg_offset + info.reg_words;
   else if (info.reg_words > 0)
-    cum->num_fprs += MAX_FPRS_PER_FMT;
+    cum->num_fprs += mips_abi == ABI_U64 ? info.reg_words : MAX_FPRS_PER_FMT;
 
   /* Advance the stack word count.  */
   if (info.stack_words > 0)
@@ -6649,7 +6801,7 @@ mips_function_arg_padding (machine_mode mode, const_tree type)
       return PAD_DOWNWARD;
 
   /* Other types are padded upward for o32, o64, n32 and n64.  */
-  if (mips_abi != ABI_EABI)
+  if (mips_abi != ABI_EABI && mips_abi != ABI_U64)
     return PAD_UPWARD;
 
   /* Arguments smaller than a stack slot are padded downward.  */
@@ -6707,7 +6859,7 @@ mips_pass_by_reference (cumulative_args_t, const function_arg_info &arg)
 static bool
 mips_callee_copies (cumulative_args_t, const function_arg_info &arg)
 {
-  return mips_abi == ABI_EABI && arg.named;
+  return (mips_abi == ABI_EABI && arg.named) || mips_abi == ABI_U64;
 }
 
 /* See whether VALTYPE is a record whose fields should be returned in
@@ -6739,15 +6891,17 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
 			bool *has_cxx17_empty_base)
 {
   tree field;
-  int i;
+  int i, n, num, max;
 
-  if (!TARGET_NEWABI)
+  if (!TARGET_NEWABI && mips_abi != ABI_U64)
     return 0;
 
   if (TREE_CODE (valtype) != RECORD_TYPE)
     return 0;
 
   i = 0;
+  num = 0;
+  max = mips_abi == ABI_U64 ? 4 >> (MAX_FPRS_PER_FMT-1) : 2;
   for (field = TYPE_FIELDS (valtype); field != 0; field = DECL_CHAIN (field))
     {
       if (TREE_CODE (field) != FIELD_DECL)
@@ -6755,23 +6909,33 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
 
       if (cxx17_empty_base_field_p (field))
 	{
-	  *has_cxx17_empty_base = true;
+	  if (has_cxx17_empty_base)
+	    *has_cxx17_empty_base = true;
 	  continue;
 	}
 
       if (DECL_FIELD_CXX_ZERO_WIDTH_BIT_FIELD (field))
 	{
-	  *has_cxx_zero_width_bf = true;
+	  if (has_cxx_zero_width_bf)
+	    *has_cxx_zero_width_bf = true;
 	  continue;
 	}
 
-      if (!SCALAR_FLOAT_TYPE_P (TREE_TYPE (field)))
+      if (SCALAR_FLOAT_TYPE_P (TREE_TYPE (field)))
+	n = 1;
+      else if (mips_abi == ABI_U64 && COMPLEX_FLOAT_TYPE_P (TREE_TYPE (field)))
+	n = 2;
+      else
 	return 0;
 
-      if (i == 2)
+      if (num == max)
 	return 0;
 
-      fields[i++] = field;
+      if (fields)
+	fields[i] = field;
+
+      i++;
+      num += n;
     }
   return i;
 }
@@ -6789,7 +6953,8 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
 static bool
 mips_return_in_msb (const_tree valtype)
 {
-  if (!TARGET_NEWABI || !TARGET_BIG_ENDIAN || !AGGREGATE_TYPE_P (valtype))
+  if ((!TARGET_NEWABI && mips_abi != ABI_U64)
+      || !TARGET_BIG_ENDIAN || !AGGREGATE_TYPE_P (valtype))
     return false;
 
   tree fields[2];
@@ -6870,6 +7035,41 @@ mips_return_fpr_pair (machine_mode mode,
 
 }
 
+static rtx
+mips_return_fpr_vec (machine_mode mode, tree *fields, int count)
+{
+  rtx pattern, rexp, off;
+  int i, j, reg;
+  machine_mode cmode;
+
+  pattern = gen_rtx_PARALLEL (mode, rtvec_alloc (count));
+
+  for (i = 0, j = 0, reg = FP_RETURN; i < count; i++, j++)
+    {
+      if (COMPLEX_FLOAT_TYPE_P (TREE_TYPE (fields[i])))
+	{
+	  cmode = GET_MODE_INNER (TYPE_MODE (TREE_TYPE (fields[i])));
+	  rexp = gen_rtx_REG (cmode, reg);
+	  off = GEN_INT (int_byte_position (fields[i]));
+	  XVECEXP (pattern, 0, j++) = gen_rtx_EXPR_LIST (VOIDmode, rexp, off);
+
+	  reg += MAX_FPRS_PER_FMT;
+	  rexp = gen_rtx_REG (cmode, reg);
+	  off += GET_MODE_SIZE (cmode);
+	  XVECEXP (pattern, 0, j) = gen_rtx_EXPR_LIST (VOIDmode, rexp, off);
+	}
+      else
+	{
+	  rexp = gen_rtx_REG (TYPE_MODE (TREE_TYPE (fields[i])), reg);
+	  off = GEN_INT (int_byte_position (fields[i]));
+	  XVECEXP (pattern, 0, j) = gen_rtx_EXPR_LIST (VOIDmode, rexp, off);
+	}
+      reg += MAX_FPRS_PER_FMT;
+    }
+
+  return pattern;
+}
+
 /* Implement TARGET_FUNCTION_VALUE and TARGET_LIBCALL_VALUE.
    For normal calls, VALTYPE is the return type and MODE is VOIDmode.
    For libcalls, VALTYPE is null and MODE is the mode of the return value.  */
@@ -6880,7 +7080,7 @@ mips_function_value_1 (const_tree valtype, const_tree fn_decl_or_type,
 {
   if (valtype)
     {
-      tree fields[2];
+      tree fields[4];
       int unsigned_p;
       const_tree func;
 
@@ -6950,6 +7150,9 @@ mips_function_value_1 (const_tree valtype, const_tree fn_decl_or_type,
 	      last_reported_type_uid = uid;
 	    }
 	}
+
+      if (mips_abi == ABI_U64 && use_fpr)
+	return mips_return_fpr_vec (mode, fields, use_fpr);
 
       /* Handle structures whose fields are returned in $f0/$f2.  */
       switch (use_fpr)
@@ -7047,7 +7250,7 @@ mips_function_value_regno_p (const unsigned int regno)
      return registers are described as 64-bit even though floating-point
      registers are primarily described as 32-bit internally.
      See: mips_get_reg_raw_mode.  */
-  if ((mips_abi == ABI_32 && TARGET_FLOAT32)
+  if (((mips_abi == ABI_32 && TARGET_FLOAT32) || mips_abi == ABI_U64)
       && FP_RETURN != GP_RETURN
       && (regno == FP_RETURN + 1
 	  || regno == FP_RETURN + 3))
@@ -7071,6 +7274,10 @@ mips_return_in_memory (const_tree type, const_tree fndecl ATTRIBUTE_UNUSED)
     return (VECTOR_FLOAT_TYPE_P (type)
 	    || TYPE_MODE (type) == BLKmode);
 
+  if (mips_abi == ABI_U64
+      && IN_RANGE (mips_fpr_return_fields (type, NULL, NULL, NULL), 1, 4))
+    return false;
+
   return (!IN_RANGE (int_size_in_bytes (type), 0, 2 * UNITS_PER_WORD));
 }
 
@@ -7083,6 +7290,9 @@ mips_setup_incoming_varargs (cumulative_args_t cum,
 {
   CUMULATIVE_ARGS local_cum;
   int gp_saved, fp_saved;
+
+  if (mips_abi == ABI_U64)
+    return;
 
   /* The caller has advanced CUM up to, but not beyond, the last named
      argument.  Advance a local copy of CUM past the last "real" named
@@ -7687,7 +7897,8 @@ mips_load_call_address (enum mips_call_type type, rtx dest, rtx addr)
      possible for sibcalls when $gp is call-saved because the value
      of $gp on entry to the stub would be our caller's gp, not ours.  */
   if (TARGET_EXPLICIT_RELOCS
-      && !(type == MIPS_CALL_SIBCALL && TARGET_CALL_SAVED_GP)
+      && !((type == MIPS_CALL_SIBCALL || type == MIPS_CALL_EPILOGUE_SIBCALL)
+	   && TARGET_CALL_SAVED_GP)
       && mips_ok_for_lazy_binding_p (addr))
     {
       addr = mips_got_load (dest, addr, SYMBOL_GOTOFF_CALL);
@@ -8354,7 +8565,7 @@ mips_expand_call (enum mips_call_type type, rtx result, rtx addr,
   orig_addr = addr;
   if (!call_insn_operand (addr, VOIDmode))
     {
-      if (type == MIPS_CALL_EPILOGUE)
+      if (type == MIPS_CALL_EPILOGUE || type == MIPS_CALL_EPILOGUE_SIBCALL)
 	addr = MIPS_EPILOGUE_TEMP (Pmode);
       else
 	addr = gen_reg_rtx (Pmode);
@@ -8365,33 +8576,65 @@ mips_expand_call (enum mips_call_type type, rtx result, rtx addr,
     {
       rtx (*fn) (rtx, rtx);
 
-      if (type == MIPS_CALL_SIBCALL)
+      if (type == MIPS_CALL_SIBCALL || type == MIPS_CALL_EPILOGUE_SIBCALL)
 	fn = gen_sibcall_internal;
       else
 	fn = gen_call_internal;
 
       pattern = fn (addr, args_size);
     }
-  else if (GET_CODE (result) == PARALLEL && XVECLEN (result, 0) == 2)
+  else if (GET_CODE (result) == PARALLEL
+	&& IN_RANGE (XVECLEN (result, 0), 2, mips_abi == ABI_U64 ? 4 : 2))
     {
       /* Handle return values created by mips_return_fpr_pair.  */
-      rtx (*fn) (rtx, rtx, rtx, rtx);
-      rtx reg1, reg2;
+      rtx regs[4];
+      int i, len;
 
-      if (type == MIPS_CALL_SIBCALL)
-	fn = gen_sibcall_value_multiple_internal;
+      len = XVECLEN (result, 0);
+      for (i = 0; i < len; i++)
+	regs[i] = XEXP (XVECEXP (result, 0, i), 0);
+
+      if (len == 2)
+	{
+	  rtx (*fn) (rtx, rtx, rtx, rtx);
+
+	  if (type == MIPS_CALL_SIBCALL || type == MIPS_CALL_EPILOGUE_SIBCALL)
+	    fn = gen_sibcall_value_multiple_internal;
+	  else
+	    fn = gen_call_value_multiple_internal;
+
+	  pattern = fn (regs[0], addr, args_size, regs[1]);
+	}
+      else if (len == 3)
+	{
+	  rtx (*fn) (rtx, rtx, rtx, rtx, rtx);
+
+	  if (type == MIPS_CALL_SIBCALL || type == MIPS_CALL_EPILOGUE_SIBCALL)
+	    fn = gen_sibcall_value_triple_internal;
+	  else
+	    fn = gen_call_value_triple_internal;
+
+	  pattern = fn (regs[0], addr, args_size, regs[1], regs[2]);
+	}
+      else if (len == 4)
+	{
+	  rtx (*fn) (rtx, rtx, rtx, rtx, rtx, rtx);
+
+	  if (type == MIPS_CALL_SIBCALL || type == MIPS_CALL_EPILOGUE_SIBCALL)
+	    fn = gen_sibcall_value_quad_internal;
+	  else
+	    fn = gen_call_value_quad_internal;
+
+	  pattern = fn (regs[0], addr, args_size, regs[1], regs[2], regs[3]);
+	}
       else
-	fn = gen_call_value_multiple_internal;
-
-      reg1 = XEXP (XVECEXP (result, 0, 0), 0);
-      reg2 = XEXP (XVECEXP (result, 0, 1), 0);
-      pattern = fn (reg1, addr, args_size, reg2);
+	gcc_unreachable ();
     }
   else
     {
       rtx (*fn) (rtx, rtx, rtx);
 
-      if (type == MIPS_CALL_SIBCALL)
+      if (type == MIPS_CALL_SIBCALL || type == MIPS_CALL_EPILOGUE_SIBCALL)
 	fn = gen_sibcall_value_internal;
       else
 	fn = gen_call_value_internal;
@@ -10446,6 +10689,8 @@ mips_mdebug_abi_name (void)
       return "abi64";
     case ABI_EABI:
       return TARGET_64BIT ? "eabi64" : "eabi32";
+    case ABI_U64:
+      return "abiU64";
     default:
       gcc_unreachable ();
     }
@@ -10473,7 +10718,7 @@ mips_file_start (void)
      EABI from long64 forms.  Emit a special section to help tools
      such as GDB.  Do the same for o64, which is sometimes used with
      -mlong64.  */
-  if (mips_abi == ABI_EABI || mips_abi == ABI_O64)
+  if (mips_abi == ABI_EABI || mips_abi == ABI_O64 || mips_abi == ABI_U64)
     fprintf (asm_out_file, "\t.section .gcc_compiled_long%d\n"
 	     "\t.previous\n", TARGET_LONG64 ? 64 : 32);
 
@@ -11587,6 +11832,10 @@ mips_save_reg_p (unsigned int regno)
    They decrease stack_pointer_rtx but leave frame_pointer_rtx and
    hard_frame_pointer_rtx unchanged.  */
 
+#define GPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_WORD)
+#define FPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_FPREG)
+#define HWFPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_HWFPVALUE)
+
 static void
 mips_compute_frame_info (void)
 {
@@ -11680,13 +11929,17 @@ mips_compute_frame_info (void)
 
   if (!cfun->machine->is_naked)
     {
+      int min = 0;
+
       /* Find out which GPRs we need to save.  */
-      for (regno = GP_REG_FIRST; regno <= GP_REG_LAST; regno++)
-        if (mips_save_reg_p (regno))
-          {
-            frame->num_gp++;
-            frame->mask |= 1 << (regno - GP_REG_FIRST);
-          }
+      for (regno = GP_REG_FIRST + 1; regno <= GP_REG_LAST; regno++)
+	{
+	  if (mips_save_reg_p (regno))
+	    {
+	      frame->num_gp++;
+	      frame->mask |= 1 << (regno - GP_REG_FIRST);
+	    }
+	}
 
       /* If this function calls eh_return, we must also save and restore the
          EH data registers.  */
@@ -11696,6 +11949,29 @@ mips_compute_frame_info (void)
             frame->num_gp++;
             frame->mask |= 1 << (EH_RETURN_DATA_REGNO (i) - GP_REG_FIRST);
           }
+
+      if (TARGET_SAVE_RESTORE && !TARGET_MICROMIPS && !TARGET_MIPS16)
+        {
+
+          /* Threshold is two extra instructions needed for setting the
+             pointer and calling the handler. On leaf functions the $ra
+             register needs to be saved as well.  */
+          min = crtl->is_leaf ? 4 : 3;
+          if (frame->mask && popcount_hwi (frame->mask & 0x00ff0000) >= min)
+            {
+              /* One less for counting FPRs later.  */
+              min--;
+              frame->gpr_libcall_p = true;
+              frame->gpr_includes_fp_p
+                = (frame->mask & (frame_pointer_needed ? 0x00800000 : 0x40800000)) != 0;
+              if (frame->gpr_includes_fp_p)
+                frame->mask |= 0x40ff0000;
+              else
+                frame->mask
+                  |= ((1 << (floor_log2 ((frame->mask & 0x00ff0000) >> 16) + 1)) - 1) << 16;
+              frame->mask |= 1 << RETURN_ADDR_REGNUM;
+            }
+        }
 
       /* The MIPS16e SAVE and RESTORE instructions have two ranges of registers:
          $a3-$a0 and $s2-$s8.  If we save one register in the range, we must
@@ -11711,25 +11987,35 @@ mips_compute_frame_info (void)
       /* Move above the GPR save area.  */
       if (frame->num_gp > 0)
         {
-          offset += MIPS_STACK_ALIGN (frame->num_gp * UNITS_PER_WORD);
-          frame->gp_sp_offset = offset - UNITS_PER_WORD;
+          offset += MIPS_STACK_ALIGN (frame->num_gp * GPR_STACK_UNITS);
+          frame->gp_sp_offset = offset - GPR_STACK_UNITS;
         }
 
       /* Find out which FPRs we need to save.  This loop must iterate over
          the same space as its companion in mips_for_each_saved_gpr_and_fpr.  */
       if (TARGET_HARD_FLOAT)
-        for (regno = FP_REG_FIRST; regno <= FP_REG_LAST; regno += MAX_FPRS_PER_FMT)
-          if (mips_save_reg_p (regno))
+        {
+          for (regno = FP_REG_FIRST; regno <= FP_REG_LAST; regno += MAX_FPRS_PER_FMT)
+            if (mips_save_reg_p (regno))
+              {
+                frame->num_fp += MAX_FPRS_PER_FMT;
+                frame->fmask |= ~(~0U << MAX_FPRS_PER_FMT) << (regno - FP_REG_FIRST);
+              }
+
+          if (frame->fmask && min != 0
+              && popcount_hwi (frame->fmask & 0xfff00000) >= min)
             {
-              frame->num_fp += MAX_FPRS_PER_FMT;
-              frame->fmask |= ~(~0U << MAX_FPRS_PER_FMT) << (regno - FP_REG_FIRST);
+              frame->fpr_libcall_p = true;
+              frame->mask |= 1 << RETURN_ADDR_REGNUM;
+              frame->fmask |= ((1 << (floor_log2 ((frame->fmask & 0xfff00000) >> 20) + 1)) - 1) << 20;
             }
+        }
 
       /* Move above the FPR save area.  */
       if (frame->num_fp > 0)
         {
-          offset += MIPS_STACK_ALIGN (frame->num_fp * UNITS_PER_FPREG);
-          frame->fp_sp_offset = offset - UNITS_PER_HWFPVALUE;
+          offset += MIPS_STACK_ALIGN (frame->num_fp * FPR_STACK_UNITS);
+          frame->fp_sp_offset = offset - HWFPR_STACK_UNITS;
         }
 
       /* Add in space for the interrupt context information.  */
@@ -12269,7 +12555,8 @@ umips_build_save_restore (mips_save_restore_fn fn,
 
 static void
 mips_for_each_saved_gpr_and_fpr (HOST_WIDE_INT sp_offset,
-				 mips_save_restore_fn fn)
+				 mips_save_restore_fn fn,
+				 bool use_handlers_p)
 {
   machine_mode fpr_mode;
   int regno;
@@ -12284,6 +12571,9 @@ mips_for_each_saved_gpr_and_fpr (HOST_WIDE_INT sp_offset,
   offset = frame->gp_sp_offset - sp_offset;
   mask = frame->mask;
 
+  if (use_handlers_p && frame->gpr_libcall_p)
+    mask &= ~(frame->gpr_includes_fp_p ? 0x40ff0000 : 0x00ff0000);
+
   if (TARGET_MICROMIPS)
     umips_build_save_restore (fn, &mask, &offset);
 
@@ -12293,18 +12583,23 @@ mips_for_each_saved_gpr_and_fpr (HOST_WIDE_INT sp_offset,
 	/* Record the ra offset for use by mips_function_profiler.  */
 	if (regno == RETURN_ADDR_REGNUM)
 	  cfun->machine->frame.ra_fp_offset = offset + sp_offset;
-	mips_save_restore_reg (word_mode, regno, offset, fn);
-	offset -= UNITS_PER_WORD;
+	mips_save_restore_reg (mips_abi == ABI_U64 ? SImode : word_mode,
+			       regno, offset, fn);
+	offset -= GPR_STACK_UNITS;
       }
+
+  mask = cfun->machine->frame.fmask;
+  if (use_handlers_p && frame->fpr_libcall_p)
+    mask &= ~0xfff00000;
 
   /* This loop must iterate over the same space as its companion in
      mips_compute_frame_info.  */
   offset = cfun->machine->frame.fp_sp_offset - sp_offset;
-  fpr_mode = (TARGET_SINGLE_FLOAT ? SFmode : DFmode);
+  fpr_mode = (TARGET_SINGLE_FLOAT || mips_abi == ABI_U64 ? SFmode : DFmode);
   for (regno = FP_REG_LAST - MAX_FPRS_PER_FMT + 1;
        regno >= FP_REG_FIRST;
        regno -= MAX_FPRS_PER_FMT)
-    if (BITSET_P (cfun->machine->frame.fmask, regno - FP_REG_FIRST))
+    if (BITSET_P (mask, regno - FP_REG_FIRST))
       {
 	if (!TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT
 	    && (fixed_regs[regno] || fixed_regs[regno + 1]))
@@ -12361,7 +12656,7 @@ mips_emit_save_slot_move (rtx dest, rtx src, rtx temp)
       /* We don't yet know whether we'll need this instruction or not.
 	 Postpone the decision by emitting a ghost move.  This move
 	 is specifically not frame-related; only the split version is.  */
-      if (TARGET_64BIT)
+      if (TARGET_64BIT && mips_abi != ABI_U64)
 	emit_insn (gen_move_gpdi (dest, src));
       else
 	emit_insn (gen_move_gpsi (dest, src));
@@ -12798,6 +13093,158 @@ mips_emit_4300_stack_cache_op (HOST_WIDE_INT size, long op, unsigned tmpreg)
     }
 }
 
+static void
+mips_emit_save_libcall (HOST_WIDE_INT sp_offset)
+{
+  const struct mips_frame_info *frame;
+  unsigned i, num;
+  HOST_WIDE_INT offset;
+  rtx insn, *list;
+
+  frame = &cfun->machine->frame;
+
+  if (frame->gpr_libcall_p)
+    {
+      offset = frame->gp_sp_offset - sp_offset + GPR_STACK_UNITS;
+      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
+				stack_pointer_rtx, GEN_INT (offset)));
+
+      num = popcount_hwi (frame->mask & (frame->gpr_includes_fp_p
+					 ? 0x40ff0000 : 0x00ff0000));
+      insn = emit_insn (gen_gpr_save (GEN_INT (num)));
+      list = &CALL_INSN_FUNCTION_USAGE (insn);
+      use_reg (list, gen_rtx_REG (Pmode, AT_REGNUM));
+      for (i = 0; i < 8 && BITSET_P (frame->mask, i + 16); i++)
+	use_reg (list, gen_rtx_REG (Pmode, GP_REG_FIRST + i + 16));
+      if (BITSET_P (frame->mask, 30))
+	use_reg (list, gen_rtx_REG (Pmode, GP_REG_FIRST + 30));
+    }
+
+  if (frame->fpr_libcall_p)
+    {
+      offset = frame->fp_sp_offset - sp_offset + HWFPR_STACK_UNITS;
+      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
+				stack_pointer_rtx, GEN_INT (offset)));
+
+      num = popcount_hwi (frame->fmask & 0xfff00000);
+      insn = emit_insn (gen_fpr_save (GEN_INT (num)));
+      list = &CALL_INSN_FUNCTION_USAGE (insn);
+      for (i = 0; i < 12 && BITSET_P (frame->fmask, i + 20); i++)
+	use_reg (list, gen_rtx_REG (Pmode, FP_REG_FIRST + i + 20));
+    }
+}
+
+static void
+mips_use_return_value (rtx_insn *insn, rtx result, rtx_call_insn *sibcall)
+{
+  rtx *list = &CALL_INSN_FUNCTION_USAGE (insn);
+
+  /* Sibcalls need to keep the arguments instead of the return value. */
+  if (sibcall != nullptr)
+    {
+      rtx usage = CALL_INSN_FUNCTION_USAGE (sibcall);
+      while (usage != NULL_RTX && GET_CODE (usage) == EXPR_LIST)
+	{
+	  if (GET_CODE (XEXP (usage, 0)) == USE)
+	    use_reg (list, XEXP (XEXP (usage, 0), 0));
+	  usage = XEXP (usage, 1);
+	}
+      return;
+    }
+
+  if (result == NULL_RTX)
+    return;
+
+  if (GET_CODE (result) == PARALLEL)
+    {
+      int i, len;
+
+      len = XVECLEN (result, 0);
+      for (i = 0; i < len; i++)
+	use_reg (list, XEXP (XVECEXP (result, 0, i), 0));
+    }
+  else if (REG_P (result))
+    use_reg (list, result);
+}
+
+static void
+mips_emit_restore_libcall (HOST_WIDE_INT sp_offset, rtx_call_insn *sibcall,
+			   bool tail_p)
+{
+  const struct mips_frame_info *frame;
+  unsigned i;
+  HOST_WIDE_INT offset;
+  bool ctail_p;
+  rtx_insn *insn;
+  rtx num, *list;
+
+  frame = &cfun->machine->frame;
+
+  if (frame->gpr_libcall_p)
+    {
+      num = GEN_INT (popcount_hwi (frame->mask & (frame->gpr_includes_fp_p
+						  ? 0x40ff0000 : 0x00ff0000)));
+      offset = frame->gp_sp_offset - sp_offset + GPR_STACK_UNITS;
+      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
+				stack_pointer_rtx, GEN_INT (offset)));
+
+      ctail_p = tail_p && !frame->fpr_libcall_p;
+      if (ctail_p)
+	mips_frame_barrier ();
+      insn
+	= emit_insn ((ctail_p ? gen_gpr_tail_restore : gen_gpr_restore) (num));
+      list = &CALL_INSN_FUNCTION_USAGE (insn);
+      use_reg (list, gen_rtx_REG (Pmode, AT_REGNUM));
+      for (i = 0; i < 8 && BITSET_P (frame->mask, i + 16); i++)
+	clobber_reg (list, gen_rtx_REG (Pmode, GP_REG_FIRST + i + 16));
+      if (BITSET_P (frame->mask, 30))
+	clobber_reg (list, gen_rtx_REG (Pmode, GP_REG_FIRST + 30));
+      mips_use_return_value (insn, crtl->return_rtx, sibcall);
+      if (ctail_p)
+	emit_barrier ();
+    }
+
+  if (frame->fpr_libcall_p)
+    {
+      num = GEN_INT (popcount_hwi (frame->fmask & 0xfff00000));
+      offset = frame->fp_sp_offset - sp_offset + HWFPR_STACK_UNITS;
+      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
+				stack_pointer_rtx, GEN_INT (offset)));
+
+      ctail_p = tail_p && frame->gpr_libcall_p;
+      if (ctail_p)
+	mips_frame_barrier ();
+      insn
+	= emit_insn ((ctail_p ? gen_fpr_tail_restore : gen_fpr_restore) (num));
+      list = &CALL_INSN_FUNCTION_USAGE (insn);
+      use_reg (list, gen_rtx_REG (Pmode, AT_REGNUM));
+      for (i = 0; i < 12 && BITSET_P (frame->fmask, i + 20); i++)
+	clobber_reg (list, gen_rtx_REG (Pmode, FP_REG_FIRST + i + 20));
+      mips_use_return_value (insn, crtl->return_rtx, sibcall);
+      if (ctail_p)
+	emit_barrier ();
+    }
+}
+
+void
+mips_expand_save_restore_libcall (const char *func_name, rtx regs, bool link_p)
+{
+  static char buffer[64];
+  enum mips_call_type type;
+  rtx sym, insn;
+
+  snprintf (buffer, sizeof buffer, "%s%ld", func_name, INTVAL (regs) - 1);
+  sym = init_one_libfunc (buffer);
+  type = link_p ? MIPS_CALL_EPILOGUE : MIPS_CALL_EPILOGUE_SIBCALL;
+  insn = mips_expand_call (type, link_p ? NULL_RTX : crtl->return_rtx,
+			   sym, const0_rtx, NULL_RTX, false);
+  if (!link_p)
+    {
+      SIBLING_CALL_P (insn) = 1;
+      add_reg_note (insn, REG_CALL_DECL, sym);
+    }
+}
+
 /* Expand the "prologue" pattern.  */
 
 void
@@ -12855,6 +13302,7 @@ mips_expand_prologue (void)
       || frame->num_cop0_regs > 0)
     {
       HOST_WIDE_INT step1;
+      bool use_handlers_p;
 
       step1 = MIN (size, MIPS_MAX_FIRST_STACK_STEP);
       if (GENERATE_MIPS16E_SAVE_RESTORE)
@@ -12877,7 +13325,7 @@ mips_expand_prologue (void)
  	  for (regno = GP_REG_FIRST; regno < GP_REG_LAST; regno++)
  	    if (BITSET_P (mask, regno - GP_REG_FIRST))
  	      {
-		offset -= UNITS_PER_WORD;
+		offset -= GPR_STACK_UNITS;
 		mips_save_restore_reg (word_mode, regno,
 				       offset, mips_save_reg);
  	      }
@@ -13008,8 +13456,12 @@ mips_expand_prologue (void)
 		  size -= step1;
 		}
 	    }
+	  use_handlers_p = mips_uses_save_restore_libcalls_p ();
 	  mips_for_each_saved_acc (size, mips_save_reg);
-	  mips_for_each_saved_gpr_and_fpr (size, mips_save_reg);
+	  mips_for_each_saved_gpr_and_fpr (size, mips_save_reg,
+					   use_handlers_p);
+	  if (use_handlers_p)
+	    mips_emit_save_libcall (size);
 	}
     }
 
@@ -13244,13 +13696,15 @@ mips_expand_before_return (void)
    says which.  */
 
 void
-mips_expand_epilogue (bool sibcall_p)
+mips_expand_epilogue (rtx_call_insn *call)
 {
   const struct mips_frame_info *frame;
   HOST_WIDE_INT step1, step2;
   rtx base, adjust;
   rtx_insn *insn;
   bool use_jraddiusp_p = false;
+  int restore_mode = 0;
+  bool sibcall_p = call != nullptr;
 
   if (!sibcall_p && mips_can_use_return_insn ())
     {
@@ -13284,6 +13738,21 @@ mips_expand_epilogue (bool sibcall_p)
   mips_epilogue.cfa_offset = step1;
   mips_epilogue.cfa_restores = NULL_RTX;
 
+  /* Choose a normal libcall, tail libcall, or none. */
+  if (mips_uses_save_restore_libcalls_p ())
+    {
+      if (!cfun->machine->interrupt_handler_p
+	  && !crtl->calls_eh_return
+	  && !cfun->calls_alloca
+	  && TARGET_SIBCALLS
+	  && !sibcall_p
+	  && (frame->gp_sp_offset + GPR_STACK_UNITS == frame->total_size
+	      || frame->fp_sp_offset + HWFPR_STACK_UNITS == frame->total_size))
+	restore_mode = 2;
+      else
+	restore_mode = 1;
+    }
+
   /* If we need to restore registers, deallocate as much stack as
      possible in the second step without going out of range.  */
   if ((frame->mask | frame->fmask | frame->acc_mask) != 0
@@ -13300,7 +13769,8 @@ mips_expand_epilogue (bool sibcall_p)
       mips_emit_move (MIPS_EPILOGUE_TEMP (Pmode), adjust);
       adjust = MIPS_EPILOGUE_TEMP (Pmode);
     }
-  mips_deallocate_stack (base, adjust, step2);
+  if (restore_mode < 2)
+    mips_deallocate_stack (base, adjust, step2);
 
   /* epilogue: naked  */
   if (cfun->machine->is_naked)
@@ -13343,10 +13813,23 @@ mips_expand_epilogue (bool sibcall_p)
     }
   else
     {
+      HOST_WIDE_INT size = frame->total_size - step2;
+
       /* Restore the registers.  */
-      mips_for_each_saved_acc (frame->total_size - step2, mips_restore_reg);
-      mips_for_each_saved_gpr_and_fpr (frame->total_size - step2,
-				       mips_restore_reg);
+      mips_for_each_saved_acc (size, mips_restore_reg);
+      if (restore_mode == 2)
+	{
+	  mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, true);
+	  mips_epilogue_set_cfa (stack_pointer_rtx, 0);
+	  mips_emit_restore_libcall (size, call, true);
+	}
+      else if (restore_mode == 1)
+	{
+	  mips_emit_restore_libcall (size, call, false);
+	  mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, true);
+	}
+      else
+	mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, false);
 
       if (cfun->machine->interrupt_handler_p)
 	{
@@ -13390,7 +13873,7 @@ mips_expand_epilogue (bool sibcall_p)
 	       && step2 > 0
 	       && mips_unsigned_immediate_p (step2, 5, 2))
 	use_jraddiusp_p = true;
-      else
+      else if (restore_mode < 2)
 	/* Deallocate the final bit of the frame.  */
 	mips_deallocate_stack (stack_pointer_rtx, GEN_INT (step2), 0);
     }
@@ -13418,7 +13901,8 @@ mips_expand_epilogue (bool sibcall_p)
 				  EH_RETURN_STACKADJ_RTX));
     }
 
-  mips_emit_4300_stack_cache_op (frame->total_size, 4, AT_REGNUM);
+  if (restore_mode < 2)
+    mips_emit_4300_stack_cache_op (frame->total_size, 4, AT_REGNUM);
 
   if (!sibcall_p)
     {
@@ -13431,7 +13915,7 @@ mips_expand_epilogue (bool sibcall_p)
 	  else
 	    emit_jump_insn (gen_mips_eret ());
 	}
-      else
+      else if (restore_mode < 2)
 	{
 	  rtx pat;
 
@@ -13666,6 +14150,10 @@ mips_hard_regno_call_part_clobbered (unsigned int, unsigned int regno,
     return true;
 
   if (ISA_HAS_MSA && FP_REG_P (regno) && GET_MODE_SIZE (mode) > 8)
+    return true;
+
+  if (mips_abi == ABI_U64 && (GP_REG_P (regno) || FP_REG_P (regno))
+      && !call_used_regs[regno] && GET_MODE_SIZE (mode) > 4)
     return true;
 
   return false;
@@ -18747,10 +19235,11 @@ r10k_insert_cache_barriers (void)
    SECOND_CALL.  */
 
 static rtx
-mips_call_expr_from_insn (rtx_insn *insn, rtx *second_call)
+mips_call_expr_from_insn (const rtx_insn *insn, rtx *extra_calls)
 {
   rtx x;
   rtx x2;
+  int i;
 
   if (!CALL_P (insn))
     return NULL_RTX;
@@ -18758,13 +19247,17 @@ mips_call_expr_from_insn (rtx_insn *insn, rtx *second_call)
   x = PATTERN (insn);
   if (GET_CODE (x) == PARALLEL)
     {
-      /* Calls returning complex values have two CALL rtx.  Look for the second
-	 one here, and return it via the SECOND_CALL arg.  */
-      x2 = XVECEXP (x, 0, 1);
-      if (GET_CODE (x2) == SET)
-	x2 = XEXP (x2, 1);
-      if (GET_CODE (x2) == CALL)
-	*second_call = x2;
+      /* Calls returning complex values have up to four CALL rtx. Look
+	 for additional ones here, and return then via EXTRA_CALLS.  */
+      if (extra_calls)
+	for (i = 1; i < XVECLEN (x, 0) && i < 4; i++)
+	  {
+	    x2 = XVECEXP (x, 0, i);
+	    if (GET_CODE (x2) == SET)
+	      x2 = XEXP (x2, i);
+	    if (GET_CODE (x2) == CALL)
+	      extra_calls[i - 1] = x2;
+	  }
 
       x = XVECEXP (x, 0, 0);
     }
@@ -18787,7 +19280,7 @@ mips_call_expr_from_insn (rtx_insn *insn, rtx *second_call)
 static rtx
 mips_pic_call_symbol_from_set (df_ref def, rtx reg, bool recurse_p)
 {
-  rtx_insn *def_insn;
+  const rtx_insn *def_insn;
   rtx set;
 
   if (DF_REF_IS_ARTIFICIAL (def))
@@ -18851,13 +19344,14 @@ mips_pic_call_symbol_from_set (df_ref def, rtx reg, bool recurse_p)
    mips_pic_call_symbol_from_set.  */
 
 static rtx
-mips_find_pic_call_symbol (rtx_insn *insn, rtx reg, bool recurse_p)
+mips_find_pic_call_symbol (const rtx_insn *insn, rtx reg, bool recurse_p)
 {
   df_ref use;
   struct df_link *defs;
   rtx symbol;
 
-  use = df_find_use (insn, regno_reg_rtx[REGNO (reg)]);
+  use = df_find_use (const_cast <rtx_insn *> (insn),
+		     regno_reg_rtx[REGNO (reg)]);
   if (!use)
     return NULL_RTX;
   defs = DF_REF_CHAIN (use);
@@ -18920,6 +19414,25 @@ mips_get_pic_call_symbol (rtx *operands, int args_size_opno)
   return true;
 }
 
+static rtx
+mips_find_call_symbol (const rtx_insn *insn)
+{
+  rtx x;
+  x = mips_call_expr_from_insn (insn, NULL);
+
+  if (!x)
+    return NULL_RTX;
+
+  gcc_assert (MEM_P (XEXP (x, 0)));
+  x = XEXP (XEXP (x, 0), 0);
+  if (REG_P (x))
+    return mips_find_pic_call_symbol (insn, x, true);
+  else if (SYMBOL_REF_P (x))
+    return x;
+
+  return NULL_RTX;
+}
+
 /* Use DF to annotate PIC indirect calls with the function symbol they
    dispatch to.  */
 
@@ -18932,10 +19445,10 @@ mips_annotate_pic_calls (void)
   FOR_EACH_BB_FN (bb, cfun)
     FOR_BB_INSNS (bb, insn)
     {
-      rtx call, reg, symbol, second_call;
+      rtx call, reg, symbol, extra_calls[3] = { 0, 0, 0 };
+      int i;
 
-      second_call = 0;
-      call = mips_call_expr_from_insn (insn, &second_call);
+      call = mips_call_expr_from_insn (insn, extra_calls);
       if (!call)
 	continue;
       gcc_assert (MEM_P (XEXP (call, 0)));
@@ -18947,8 +19460,9 @@ mips_annotate_pic_calls (void)
       if (symbol)
 	{
 	  mips_annotate_pic_call_expr (call, symbol);
-	  if (second_call)
-	    mips_annotate_pic_call_expr (second_call, symbol);
+	  for (i = 0; i < 3; i++)
+	    if (extra_calls[i])
+	      mips_annotate_pic_call_expr (extra_calls[i], symbol);
 	}
     }
 }
@@ -19594,7 +20108,7 @@ mips_classify_branch_p6600 (rtx_insn *insn)
    an issue where a floating point multiply may corrupt the result of a
    following integer or floating point multiply if one or more of the operands
    is infinity, 0, or sNaN.
-   
+
    This can also happen if the instruction is in a delay slot and the jump target
    is a multiply instruction, so this detects both a multiply or a branch slot. */
 
@@ -20905,6 +21419,8 @@ mips_option_override (void)
 	{
 	  if (mips_abi == ABI_N32)
 	    error ("%qs is incompatible with %qs", "-mabi=n32", "-mlong64");
+	  else if (mips_abi == ABI_U64)
+	    error ("%qs is incompatible with %qs", "-mabi=u64", "-mlong64");
 	  else if (mips_abi == ABI_32)
 	    error ("%qs is incompatible with %qs", "-mabi=32", "-mlong64");
 	  else if (mips_abi == ABI_O64 && TARGET_ABICALLS)
@@ -21037,6 +21553,12 @@ mips_option_override (void)
       target_flags &= ~MASK_ABICALLS;
     }
 
+  if (TARGET_SAVE_RESTORE && mips_abi != ABI_U64)
+    {
+      error ("%qs requires %qs", "-msave-restore", "-mabi=u64");
+      target_flags &= ~MASK_SAVE_RESTORE;
+    }
+
   /* PIC requires -mabicalls.  */
   if (flag_pic)
     {
@@ -21069,6 +21591,12 @@ mips_option_override (void)
      though see MOVE_RATIO in mips.h.  */
   if (optimize_size && (target_flags_explicit & MASK_MEMCPY) == 0)
     target_flags |= MASK_MEMCPY;
+
+  /* Use save/restore handlers by default when on u64 ABI and optimizing for
+     size.  */
+  if (mips_abi == ABI_U64
+      && optimize_size && (target_flags_explicit & MASK_SAVE_RESTORE) == 0)
+    target_flags |= MASK_SAVE_RESTORE;
 
   /* If we have a nonzero small-data limit, check that the -mgpopt
      setting is consistent with the other target flags.  */
@@ -21448,6 +21976,9 @@ mips_conditional_register_usage (void)
       for (regno = FP_REG_FIRST + 21; regno <= FP_REG_FIRST + 31; regno+=2)
 	call_used_regs[regno] = 1;
     }
+  /* Use AT as an additional temporary with u64 ABI. */
+    if (mips_abi == ABI_U64)
+      fixed_regs[AT_REGNUM] = 0;
   /* Make sure that double-register accumulator values are correctly
      ordered for the current endianness.  */
   if (TARGET_LITTLE_ENDIAN)
@@ -21527,6 +22058,31 @@ mips_need_noat_wrapper_p (rtx_insn *insn, rtx *opvec, int noperands)
   return false;
 }
 
+/* Return true if INSN needs to be wrapped in ".set nomacro".  */
+
+static bool
+mips_need_nomacro_wrapper_p (rtx_insn *insn)
+{
+  if (mips_abi != ABI_U64)
+    return false;
+
+  /* The U64 ABI allocates $at as a temporary register. Disable macros
+     in inline asm by default to avoid accidental clobbering.  */
+  if (NONJUMP_INSN_P (insn))
+    {
+      if (GET_CODE (PATTERN (insn)) == ASM_INPUT
+	  || (GET_CODE (PATTERN (insn)) == PARALLEL
+	      && XVECLEN (PATTERN (insn), 0) > 0
+	      && GET_CODE (XVECEXP (PATTERN (insn), 0, 0)) == ASM_INPUT))
+	return true;
+      if (GET_CODE (PATTERN (insn)) == SET
+	  && GET_CODE (SET_SRC (PATTERN (insn))) == ASM_OPERANDS)
+	return true;
+    }
+
+  return false;
+}
+
 /* Implement FINAL_PRESCAN_INSN.  Mark MIPS16 inline constant pools
    as data for the purpose of disassembly.  For simplicity embed the
    pool's initial label number in the local symbol produced so that
@@ -21546,6 +22102,12 @@ mips_final_prescan_insn (rtx_insn *insn, rtx *opvec, int noperands)
 
   if (mips_need_noat_wrapper_p (insn, opvec, noperands))
     mips_push_asm_switch (&mips_noat);
+
+  if (mips_need_nomacro_wrapper_p (insn))
+    {
+      mips_push_asm_switch (&mips_noreorder);
+      mips_push_asm_switch (&mips_nomacro);
+    }
 }
 
 /* Implement TARGET_ASM_FINAL_POSTSCAN_INSN.  Reset text marking to
@@ -21558,6 +22120,12 @@ static void
 mips_final_postscan_insn (FILE *file ATTRIBUTE_UNUSED, rtx_insn *insn,
 			  rtx *opvec, int noperands)
 {
+  if (mips_need_nomacro_wrapper_p (insn))
+    {
+      mips_pop_asm_switch (&mips_nomacro);
+      mips_pop_asm_switch (&mips_noreorder);
+    }
+
   if (mips_need_noat_wrapper_p (insn, opvec, noperands))
     mips_pop_asm_switch (&mips_noat);
 
@@ -23776,6 +24344,9 @@ mips_print_patchable_function_entry (FILE *file ATTRIBUTE_UNUSED,
 
 #undef TARGET_IN_SMALL_DATA_P
 #define TARGET_IN_SMALL_DATA_P mips_in_small_data_p
+
+#undef TARGET_EMIT_EPILOGUE_FOR_SIBCALL
+#define TARGET_EMIT_EPILOGUE_FOR_SIBCALL mips_expand_epilogue
 
 #undef TARGET_MACHINE_DEPENDENT_REORG
 #define TARGET_MACHINE_DEPENDENT_REORG mips_reorg

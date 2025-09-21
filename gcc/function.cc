@@ -6132,6 +6132,7 @@ thread_prologue_and_epilogue_insns (void)
      EPILOGUE_BEG note and mark the insns as epilogue insns.  */
   edge e;
   edge_iterator ei;
+  auto_vec<edge, 4> esibcalls;
   FOR_EACH_EDGE (e, ei, EXIT_BLOCK_PTR_FOR_FN (cfun)->preds)
     {
       rtx_insn *prev, *last, *trial;
@@ -6160,13 +6161,30 @@ thread_prologue_and_epilogue_insns (void)
 	  insert_insn_on_edge (epilogue_seq, exit_fallthru_edge);
 	  commit_edge_insertions ();
 
-	  /* The epilogue insns we inserted may cause the exit edge to no longer
-	     be fallthru.  */
 	  FOR_EACH_EDGE (e, ei, EXIT_BLOCK_PTR_FOR_FN (cfun)->preds)
 	    {
-	      if (((e->flags & EDGE_FALLTHRU) != 0)
-		  && returnjump_p (BB_END (e->src)))
-		e->flags &= ~EDGE_FALLTHRU;
+	      if ((e->flags & EDGE_FALLTHRU) != 0)
+		{
+		  rtx_insn *insn;
+
+		  /* The epilogue insns we inserted may cause the exit edge to
+		     no longer be fallthru.  */
+		  if (returnjump_p (BB_END (e->src)))
+		    e->flags &= ~EDGE_FALLTHRU;
+
+		  /* The edge needs to be changed to a sibcall ehen the epilogue
+		     inserts one.  */
+		  insn = BB_END (e->src);
+		  if (BARRIER_P (insn))
+		    {
+		      insn = PREV_INSN (insn);
+		      if (CALL_P (insn) && SIBLING_CALL_P (insn))
+			{
+			  e->flags = EDGE_SIBCALL | EDGE_ABNORMAL;
+			  esibcalls.safe_push (e);
+			}
+		    }
+		}
 	    }
 
 	  find_sub_basic_blocks (BLOCK_FOR_INSN (epilogue_seq));
@@ -6235,6 +6253,12 @@ thread_prologue_and_epilogue_insns (void)
     }
 
   default_rtl_profile ();
+
+  {
+    unsigned int i;
+    FOR_EACH_VEC_ELT (esibcalls, i, e)
+      e->flags |= EDGE_IGNORE;
+  }
 
   /* Emit sibling epilogues before any sibling call sites.  */
   for (ei = ei_start (EXIT_BLOCK_PTR_FOR_FN (cfun)->preds);

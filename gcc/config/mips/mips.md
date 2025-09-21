@@ -169,12 +169,21 @@
   UNSPEC_INSN_PSEUDO
   UNSPEC_JRHB
 
+  ;; Register save and restore.
+  UNSPEC_GPR_SAVE
+  UNSPEC_GPR_RESTORE
+  UNSPEC_GPR_TAIL_RESTORE
+  UNSPEC_FPR_SAVE
+  UNSPEC_FPR_RESTORE
+  UNSPEC_FPR_TAIL_RESTORE
+
   VUNSPEC_SPECULATION_BARRIER
 ])
 
 (define_constants
-  [(TLS_GET_TP_REGNUM		3)
+  [(AT_REGNUM			1)
    (GET_FCSR_REGNUM		2)
+   (TLS_GET_TP_REGNUM		3)
    (SET_FCSR_REGNUM		4)
    (PIC_FUNCTION_ADDR_REGNUM	25)
    (GLOBAL_POINTER_REGNUM	28)
@@ -7227,17 +7236,63 @@
   [(const_int 2)]
   ""
 {
-  mips_expand_epilogue (false);
+  mips_expand_epilogue (nullptr);
   DONE;
 })
 
-(define_expand "sibcall_epilogue"
-  [(const_int 2)]
-  ""
-{
-  mips_expand_epilogue (true);
-  DONE;
-})
+(define_expand "gpr_save"
+  [(unspec [(match_operand 0 "const_int_operand")] UNSPEC_GPR_SAVE)]
+  "TARGET_SAVE_RESTORE && !TARGET_MIPS16"
+  {
+    mips_expand_save_restore_libcall ("__mips_gpr_save_",
+				      operands[0], true);
+    DONE;
+  })
+
+(define_expand "gpr_restore"
+  [(unspec [(match_operand 0 "const_int_operand")] UNSPEC_GPR_RESTORE)]
+  "TARGET_SAVE_RESTORE && !TARGET_MIPS16"
+  {
+    mips_expand_save_restore_libcall ("__mips_gpr_restore_",
+				      operands[0], true);
+    DONE;
+  })
+
+(define_expand "gpr_tail_restore"
+  [(unspec [(match_operand 0 "const_int_operand")] UNSPEC_GPR_TAIL_RESTORE)]
+  "TARGET_SAVE_RESTORE && !TARGET_MIPS16"
+  {
+    mips_expand_save_restore_libcall ("__mips_gpr_tail_restore_",
+				      operands[0], false);
+    DONE;
+  })
+
+(define_expand "fpr_save"
+  [(unspec [(match_operand 0 "const_int_operand")] UNSPEC_FPR_SAVE)]
+  "TARGET_SAVE_RESTORE && !TARGET_MIPS16"
+  {
+    mips_expand_save_restore_libcall ("__mips_fpr_save_",
+				      operands[0], true);
+    DONE;
+  })
+
+(define_expand "fpr_restore"
+  [(unspec [(match_operand 0 "const_int_operand")] UNSPEC_FPR_RESTORE)]
+  "TARGET_SAVE_RESTORE && !TARGET_MIPS16"
+  {
+    mips_expand_save_restore_libcall ("__mips_fpr_restore_",
+				      operands[0], true);
+    DONE;
+  })
+
+(define_expand "fpr_tail_restore"
+  [(unspec [(match_operand 0 "const_int_operand")] UNSPEC_FPR_TAIL_RESTORE)]
+  "TARGET_SAVE_RESTORE && !TARGET_MIPS16"
+  {
+    mips_expand_save_restore_libcall ("__mips_fpr_tail_restore_",
+				      operands[0], false);
+    DONE;
+  })
 
 ;; Trivial return.  Make it look like a normal return insn as that
 ;; allows jump optimizations to work better.
@@ -7577,6 +7632,39 @@
   [(set_attr "jal" "indirect,direct")
    (set_attr "jal_macro" "no")])
 
+(define_insn "sibcall_value_triple_internal"
+  [(set (match_operand 0 "register_operand" "")
+        (call (mem:SI (match_operand 1 "call_insn_operand" "j,S"))
+              (match_operand 2 "" "")))
+   (set (match_operand 3 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 4 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))]
+  "TARGET_SIBCALLS && SIBLING_CALL_P (insn) && mips_abi == ABI_U64"
+  { return mips_output_jump (operands, 1, 2, false); }
+  [(set_attr "jal" "indirect,direct")
+   (set_attr "jal_macro" "no")])
+
+(define_insn "sibcall_value_quad_internal"
+  [(set (match_operand 0 "register_operand" "")
+        (call (mem:SI (match_operand 1 "call_insn_operand" "j,S"))
+              (match_operand 2 "" "")))
+   (set (match_operand 3 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 4 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 5 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))]
+  "TARGET_SIBCALLS && SIBLING_CALL_P (insn) && mips_abi == ABI_U64"
+  { return mips_output_jump (operands, 1, 2, false); }
+  [(set_attr "jal" "indirect,direct")
+   (set_attr "jal_macro" "no")])
+
 (define_expand "call"
   [(parallel [(call (match_operand 0 "")
 		    (match_operand 1 ""))
@@ -7797,6 +7885,100 @@
    (clobber (reg:SI RETURN_ADDR_REGNUM))
    (clobber (reg:SI 28))]
   "TARGET_SPLIT_CALLS"
+  { return mips_output_jump (operands, 1, 2, true); }
+  [(set_attr "jal" "indirect,direct")
+   (set_attr "jal_macro" "no")])
+
+(define_insn_and_split "call_value_triple_internal"
+  [(set (match_operand 0 "register_operand" "")
+        (call (mem:SI (match_operand 1 "call_insn_operand" "c,S"))
+              (match_operand 2 "" "")))
+   (set (match_operand 3 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 4 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (clobber (reg:SI RETURN_ADDR_REGNUM))]
+  "mips_abi == ABI_U64"
+  {
+    return (TARGET_SPLIT_CALLS ? "#"
+	    : mips_output_jump (operands, 1, 2, true));
+  }
+  "&& reload_completed && TARGET_SPLIT_CALLS"
+  [(const_int 0)]
+{
+  mips_split_call (curr_insn,
+		   gen_call_value_triple_split (operands[0], operands[1],
+						operands[2], operands[3],
+						operands[4]));
+  DONE;
+}
+  [(set_attr "jal" "indirect,direct")])
+
+(define_insn "call_value_triple_split"
+  [(set (match_operand 0 "register_operand" "")
+        (call (mem:SI (match_operand 1 "call_insn_operand" "c,S"))
+              (match_operand 2 "" "")))
+   (set (match_operand 3 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 4 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (clobber (reg:SI RETURN_ADDR_REGNUM))
+   (clobber (reg:SI 28))]
+  "TARGET_SPLIT_CALLS && mips_abi == ABI_U64"
+  { return mips_output_jump (operands, 1, 2, true); }
+  [(set_attr "jal" "indirect,direct")
+   (set_attr "jal_macro" "no")])
+
+(define_insn_and_split "call_value_quad_internal"
+  [(set (match_operand 0 "register_operand" "")
+        (call (mem:SI (match_operand 1 "call_insn_operand" "c,S"))
+              (match_operand 2 "" "")))
+   (set (match_operand 3 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 4 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 5 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (clobber (reg:SI RETURN_ADDR_REGNUM))]
+  "mips_abi == ABI_U64"
+  {
+    return (TARGET_SPLIT_CALLS ? "#"
+	    : mips_output_jump (operands, 1, 2, true));
+  }
+  "&& reload_completed && TARGET_SPLIT_CALLS"
+  [(const_int 0)]
+{
+  mips_split_call (curr_insn,
+		   gen_call_value_quad_split (operands[0], operands[1],
+					      operands[2], operands[3],
+					      operands[4], operands[5]));
+  DONE;
+}
+  [(set_attr "jal" "indirect,direct")])
+
+(define_insn "call_value_quad_split"
+  [(set (match_operand 0 "register_operand" "")
+        (call (mem:SI (match_operand 1 "call_insn_operand" "c,S"))
+              (match_operand 2 "" "")))
+   (set (match_operand 3 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 4 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (set (match_operand 5 "register_operand" "")
+	(call (mem:SI (match_dup 1))
+	      (match_dup 2)))
+   (clobber (reg:SI RETURN_ADDR_REGNUM))
+   (clobber (reg:SI 28))]
+  "TARGET_SPLIT_CALLS && mips_abi == ABI_U64"
   { return mips_output_jump (operands, 1, 2, true); }
   [(set_attr "jal" "indirect,direct")
    (set_attr "jal_macro" "no")])

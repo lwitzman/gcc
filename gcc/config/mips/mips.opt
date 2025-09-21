@@ -50,6 +50,9 @@ Enum(mips_abi) String(64) Value(ABI_64)
 EnumValue
 Enum(mips_abi) String(eabi) Value(ABI_EABI)
 
+EnumValue
+Enum(mips_abi) String(u64) Value(ABI_U64)
+
 mabicalls
 Target Mask(ABICALLS)
 Generate code that can be used in SVR4-style dynamic objects.
@@ -400,6 +403,10 @@ Enum(mips_r10k_cache_barrier_setting) String(none) Value(R10K_CACHE_BARRIER_NONE
 mrelax-pic-calls
 Target Mask(RELAX_PIC_CALLS)
 Try to allow the linker to turn PIC calls into direct calls.
+
+msave-restore
+Target Mask(SAVE_RESTORE)
+Use smaller but slower prologue and epilogue code.
 
 mshared
 Target Var(TARGET_SHARED) Init(1)
