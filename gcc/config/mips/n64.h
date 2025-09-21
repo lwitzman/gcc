@@ -30,7 +30,7 @@ along with GCC; see the file COPYING3.  If not see
 	MIPS_ARCH_FLOAT_SPEC,						\
 									\
 	/* Make -mabi=eabi the default.  */				\
-	"%{!mabi=*:-mabi=eabi}",						\
+	"%{!mabi=*:-mabi=u64}",						\
 									\
 	/* Make -mlong32 -msym32 default for all ABIs except n64. */	\
 	"%{!mabi=64:%{!mlong*:-mlong32} %{!mno-sym32:%{!msym32:-msym32}}}",	\
