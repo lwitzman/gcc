@@ -102,8 +102,15 @@
   ;; Floating-point unspecs.
   UNSPEC_FMIN
   UNSPEC_FMAX
-  UNSPEC_FRINT
   UNSPEC_FCLASS
+
+  ;; Floating-point conversions.
+  UNSPEC_FRINT
+  UNSPEC_FFLOOR
+  UNSPEC_FCEIL
+  UNSPEC_FTRUNC
+  UNSPEC_FROUNDEVEN
+  UNSPEC_FROUND
 
   ;; HI/LO moves.
   UNSPEC_MFHI
@@ -4709,6 +4716,386 @@
   emit_use (stack_pointer_rtx);
   DONE;
 })
+
+(define_insn "abs<mode>2_legacy"
+  [(set (match_operand:SCALARF 0 "register_operand" "=f")
+	(abs:SCALARF (match_operand:SCALARF 1 "register_operand" "f")))]
+  "TARGET_HARD_FLOAT"
+  "abs.<fmt>\t%0,%1"
+  [(set_attr "mode" "<MODE>")])
+
+(define_insn "lrintsfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FRINT))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+  "cvt.w.s %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_insn "lroundevensfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FROUNDEVEN))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+  "round.w.s %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_insn "lfloorsfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FFLOOR))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+  "floor.w.s\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_insn "lceilsfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FCEIL))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+  "ceil.w.s\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_expand "lroundsfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FROUND))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_iround (operands, gen_fix_truncsfsi2);
+  DONE;
+})
+
+(define_insn "lrintsfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FRINT))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "cvt.l.s %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_insn "lroundevensfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FROUNDEVEN))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "round.l.s %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_insn "lfloorsfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FFLOOR))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "floor.l.s\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_insn "lceilsfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FCEIL))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "ceil.l.s\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"SF")
+   (set_attr "cnv_mode"	"S2I")])
+
+(define_expand "lroundsfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FROUND))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_iround (operands, gen_fix_truncsfdi2);
+  DONE;
+})
+
+(define_insn "lrintdfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FRINT))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "cvt.w.d %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_insn "lroundevendfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FROUNDEVEN))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "round.w.d %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_insn "lfloordfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FFLOOR))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "floor.w.d\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_insn "lceildfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FCEIL))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "ceil.w.d\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_expand "lrounddfsi2"
+  [(set (match_operand:SI    0 "register_operand" "=f")
+	(unspec:SI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FROUND))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_iround (operands, gen_fix_truncdfsi2);
+  DONE;
+})
+
+(define_insn "lrintdfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FRINT))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "cvt.l.d %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_insn "lroundevendfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FROUNDEVEN))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "round.l.d %0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_insn "lfloordfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FFLOOR))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "floor.l.d\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_insn "lceildfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FCEIL))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+  "ceil.l.d\t%0,%1"
+  [(set_attr "type"	"fcvt")
+   (set_attr "mode"	"DF")
+   (set_attr "cnv_mode"	"D2I")])
+
+(define_expand "lrounddfdi2"
+  [(set (match_operand:DI    0 "register_operand" "=f")
+	(unspec:DI
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FROUND))]
+  "TARGET_HARD_FLOAT && TARGET_FLOAT64 && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_iround (operands, gen_fix_truncdfdi2);
+  DONE;
+})
+
+(define_expand "btruncsf2"
+  [(set (match_operand:SF         0 "register_operand" "=f")
+	(fix:SF (match_operand:SF 1 "register_operand" " f")))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_fix_truncsfsi2, false);
+  DONE;
+})
+
+(define_expand "roundsf2"
+  [(set (match_operand:SF    0 "register_operand" "=f")
+	(unspec:SF
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FROUND))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_fix_truncsfsi2, true);
+  DONE;
+})
+
+(define_expand "roundevensf2"
+  [(set (match_operand:SF    0 "register_operand" "=f")
+	(unspec:SF
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FROUNDEVEN))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_lroundevensfsi2, false);
+  DONE;
+})
+
+(define_expand "rintsf2"
+  [(set (match_operand:SF    0 "register_operand" "=f")
+	(unspec:SF
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FRINT))]
+  "ISA_HAS_FRINT || (TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact)"
+{
+  if (ISA_HAS_FRINT)
+    emit_insn (gen_rintsf2_insn (operands[0], operands[1]));
+  else
+    mips_expand_round (operands, gen_lrintsfsi2, false);
+  DONE;
+})
+
+(define_expand "floorsf2"
+  [(set (match_operand:SF    0 "register_operand" "=f")
+	(unspec:SF
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FFLOOR))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_lfloorsfsi2, false);
+  DONE;
+})
+
+(define_expand "ceilsf2"
+  [(set (match_operand:SF    0 "register_operand" "=f")
+	(unspec:SF
+	  [(match_operand:SF 1 "register_operand" " f")]
+	  UNSPEC_FCEIL))]
+  "TARGET_HARD_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_lceilsfsi2, false);
+  DONE;
+})
+
+(define_expand "btruncdf2"
+  [(set (match_operand:DF         0 "register_operand" "=f")
+	(fix:DF (match_operand:DF 1 "register_operand" " f")))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_fix_truncdfdi2, false);
+  DONE;
+})
+
+(define_expand "rounddf2"
+  [(set (match_operand:DF    0 "register_operand" "=f")
+	(unspec:DF
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FROUND))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_fix_truncdfdi2, true);
+  DONE;
+})
+
+(define_expand "roundevendf2"
+  [(set (match_operand:DF    0 "register_operand" "=f")
+	(unspec:DF
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FROUNDEVEN))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_lroundevendfdi2, false);
+  DONE;
+})
+
+(define_expand "rintdf2"
+  [(set (match_operand:DF    0 "register_operand" "=f")
+	(unspec:DF
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FRINT))]
+  "ISA_HAS_FRINT || (TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact)"
+{
+  if (ISA_HAS_FRINT)
+    emit_insn (gen_rintdf2_insn (operands[0], operands[1]));
+  else
+    mips_expand_round (operands, gen_lrintdfdi2, false);
+  DONE;
+})
+
+(define_expand "floordf2"
+  [(set (match_operand:DF    0 "register_operand" "=f")
+	(unspec:DF
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FFLOOR))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_lfloordfdi2, false);
+  DONE;
+})
+
+(define_expand "ceildf2"
+  [(set (match_operand:DF    0 "register_operand" "=f")
+	(unspec:DF
+	  [(match_operand:DF 1 "register_operand" " f")]
+	  UNSPEC_FCEIL))]
+  "TARGET_HARD_FLOAT && TARGET_64BIT && TARGET_DOUBLE_FLOAT && flag_fp_int_builtin_inexact"
+{
+  mips_expand_round (operands, gen_lceildfdi2, false);
+  DONE;
+})
+
+(define_peephole
+  [(set (match_operand:SCALARF 0) (float:SCALARF (match_operand:SI 1)))
+   (set (match_operand:SI 2) (fix:SI (match_dup 0)))]
+  "dead_or_set_p (insn, operands[0])"
+  "")
+
+(define_peephole
+  [(set (match_operand:SCALARF 0) (float:SCALARF (match_operand:DI 1)))
+   (set (match_operand:SI 2) (fix:SI (match_dup 0)))]
+  "dead_or_set_p (insn, operands[0])"
+  "")
+
+(define_peephole
+  [(set (match_operand:SCALARF 0) (float:SCALARF (match_operand:DI 1)))
+   (set (match_operand:DI 2) (fix:DI (match_dup 0)))]
+  "dead_or_set_p (insn, operands[0])"
+  "")
+
 
 ;;
 ;;  ....................
@@ -8672,7 +9059,7 @@
    (set_attr "mode" "<UNITMODE>")])
 
 ;;Float point round to integral
-(define_insn "rint<mode>2"
+(define_insn "rint<mode>2_insn"
   [(set (match_operand:SCALARF 0 "register_operand" "=f")
 	(unspec:SCALARF [(match_operand:SCALARF 1 "register_operand" "f")]
 			UNSPEC_FRINT))]

@@ -350,6 +350,9 @@ union mips_gen_fn_ptrs
   rtx (*fn_4) (rtx, rtx, rtx, rtx);
 };
 
+extern void mips_expand_iround (rtx *, rtx (*)(rtx, rtx));
+extern void mips_expand_round (rtx *, rtx (*)(rtx, rtx), bool);
+
 extern void mips_expand_atomic_qihi (union mips_gen_fn_ptrs,
 				     rtx, rtx, rtx, rtx);
 

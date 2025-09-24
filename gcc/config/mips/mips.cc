@@ -67,6 +67,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "rtl-iter.h"
 #include "flags.h"
 #include "opts.h"
+#include "dojump.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -8753,6 +8754,66 @@ mips_function_ok_for_sibcall (tree decl, tree exp)
   return true;
 }
 
+
+void
+mips_expand_iround (rtx *operands,
+		   rtx (*fn)(rtx, rtx))
+{
+  machine_mode mode = GET_MODE (operands[1]);
+  rtx reg1 = gen_reg_rtx (mode);
+  rtx reg2 = gen_reg_rtx (mode);
+  REAL_VALUE_TYPE offset;
+
+  real_nextafter (&offset, REAL_MODE_FORMAT (mode), &dconsthalf, &dconstninf);
+  mips_emit_move (reg1, const_double_from_real_value (offset, mode));
+  expand_copysign (reg1, operands[1], reg2);
+  emit_insn (gen_rtx_SET (operands[1], gen_rtx_PLUS (mode, reg1, reg2)));
+  emit_insn (fn (operands[0], operands[1]));
+}
+
+void
+mips_expand_round (rtx *operands,
+		   rtx (*fn)(rtx, rtx),
+		   bool odd_p)
+{
+  machine_mode mode = GET_MODE (operands[1]);
+  rtx reg1 = gen_reg_rtx (mode);
+  rtx reg2 = gen_reg_rtx (mode);
+  rtx reg3 = gen_reg_rtx (mode == SFmode ? SImode : DImode);
+  rtx_code_label *label1 = gen_label_rtx ();
+  rtx tmp;
+  REAL_VALUE_TYPE offset;
+  rtx (*branch)(rtx, rtx, rtx, rtx) = mode == SFmode ? gen_cbranchsf4 : gen_cbranchdf4;
+
+  do_pending_stack_adjust ();
+  if (HONOR_NANS (mode))
+    {
+      tmp = gen_rtx_UNORDERED (VOIDmode, operands[1], operands[1]);
+      tmp = emit_jump_insn (branch (tmp, operands[1], operands[1], label1));
+      JUMP_LABEL (tmp) = label1;
+    }
+  real_2expN (&offset, mode == SFmode ? 23 : 52, mode);
+  emit_insn ((mode == SFmode ? gen_abssf2_legacy : gen_absdf2_legacy) (reg1, operands[1]));
+  mips_emit_move (reg2, const_double_from_real_value (offset, mode));
+  tmp = gen_rtx_UNGE (VOIDmode, reg1, reg2);
+  tmp = emit_jump_insn (branch (tmp, reg1, reg2, label1));
+  JUMP_LABEL (tmp) = label1;
+  if (odd_p)
+    {
+      rtx reg4 = gen_reg_rtx (mode);
+      rtx reg5 = gen_reg_rtx (mode);
+
+      real_nextafter (&offset, REAL_MODE_FORMAT (mode), &dconsthalf, &dconstninf);
+      mips_emit_move (reg4, const_double_from_real_value (offset, mode));
+      expand_copysign (reg4, operands[1], reg5);
+      emit_insn (gen_rtx_SET (operands[1], gen_rtx_PLUS (mode, reg4, reg5)));
+    }
+  emit_insn (fn (reg3, operands[1]));
+  emit_insn ((mode == SFmode ? gen_floatsisf2 : gen_floatdidf2)  (operands[0], reg3));
+  emit_label (label1);
+  emit_use (stack_pointer_rtx);
+}
+
 /* Implement TARGET_USE_MOVE_BY_PIECES_INFRASTRUCTURE_P.  */
 
 bool
