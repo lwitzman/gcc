@@ -464,6 +464,10 @@ mno-unaligned-access
 Target RejectNegative Alias(mstrict-align)
 Don't generate code with unaligned load store for R6 (alias of -mstrict-align).
 
+momit-leaf-frame-pointer
+Target Var(TARGET_OMIT_LEAF_FRAME_POINTER)
+Omit the frame pointer in leaf functions.
+
 muninit-const-in-rodata
 Target Var(TARGET_UNINIT_CONST_IN_RODATA)
 Put uninitialized constants in ROM (needs -membedded-data).

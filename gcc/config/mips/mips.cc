@@ -12192,6 +12192,12 @@ mips_current_loadgp_style (void)
 static bool
 mips_frame_pointer_required (void)
 {
+  /* In mips_option_override, TARGET_OMIT_LEAF_FRAME_POINTER
+     turns off the frame pointer by default.  Turn it back on now if
+     we've not got a leaf function.  */
+  if (TARGET_OMIT_LEAF_FRAME_POINTER)
+    return !crtl->is_leaf;
+
   /* If the function contains dynamic stack allocations, we need to
      use the frame pointer to access the static parts of the frame.  */
   if (cfun->calls_alloca)
@@ -21412,6 +21418,11 @@ mips_option_override (void)
 	       mips_dcache_size_arg);
       mips_dcache_size = 1 << mips_dcache_size_arg;
   }
+
+  if (flag_omit_frame_pointer)
+    TARGET_OMIT_LEAF_FRAME_POINTER = 0;
+  else if (TARGET_OMIT_LEAF_FRAME_POINTER)
+    flag_omit_frame_pointer = 1;
 
   if (!mips_max_constant_insns)
     mips_max_constant_insns = CONSTANT_POOL_COST;
