@@ -3284,6 +3284,9 @@ struct GTY(())  mips_frame_info {
   /* The number of bytes allocated to variables.  */
   HOST_WIDE_INT var_size;
 
+  /* The number of bytes allocated to the frame chain.  */
+  HOST_WIDE_INT chain_size;
+
   /* The number of bytes allocated to outgoing function arguments.  */
   HOST_WIDE_INT args_size;
 

@@ -11775,8 +11775,7 @@ mips_cfun_might_clobber_call_saved_reg_p (unsigned int regno)
   if (cfun->machine->global_pointer == regno)
     return true;
 
-  /* The function's prologue will need to set the frame pointer if
-     frame_pointer_needed.  */
+  /* The function's prologue will need to set the frame pointer.  */
   if (regno == HARD_FRAME_POINTER_REGNUM && frame_pointer_needed)
     return true;
 
@@ -11881,6 +11880,11 @@ mips_save_reg_p (unsigned int regno)
 	|  caller-allocated save area   |  |
 	|  for register arguments       |  |
 	|                               | /
+	+-------------------------------+ \
+	|                               |  |
+	|  $ra and $fp save area        |  | chain_size
+	|  for U64 ABI                  |  |
+	|                               | /
 	+-------------------------------+ <-- stack_pointer_rtx
 					      frame_pointer_rtx without
 					        -fstack-protector
@@ -11896,6 +11900,13 @@ mips_save_reg_p (unsigned int regno)
 #define GPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_WORD)
 #define FPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_FPREG)
 #define HWFPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_HWFPVALUE)
+
+#define FRAME_CHAIN_SIZE						\
+  ((mips_abi == ABI_U64							\
+    && (!flag_omit_frame_pointer					\
+	|| (TARGET_OMIT_LEAF_FRAME_POINTER && !crtl->is_leaf))		\
+    && !TARGET_MIPS16 && !TARGET_MICROMIPS)				\
+   ? (GPR_STACK_UNITS * 2) : 0)
 
 static void
 mips_compute_frame_info (void)
@@ -11934,13 +11945,16 @@ mips_compute_frame_info (void)
   memset (frame, 0, sizeof (*frame));
   size = get_frame_size ();
 
-  /* The first two blocks contain the outgoing argument area and the $gp save
-     slot.  This area isn't needed in leaf functions.  We can also skip it
-     if we know that none of the called functions will use this space.
+  /* The first three blocks contain the frame chain, outgoing argument
+     area and the $gp save slot.  The latter two areas aren't needed in
+     leaf functions.  We can also skip it if we know that none of the
+     called functions will use this space.
 
      But if the target-independent frame size is nonzero, we have already
      committed to allocating these in TARGET_STARTING_FRAME_OFFSET for
      !FRAME_GROWS_DOWNWARD.  */
+
+  frame->chain_size = FRAME_CHAIN_SIZE;
 
   if ((size == 0 || FRAME_GROWS_DOWNWARD)
       && (crtl->is_leaf || (cfun->machine->optimize_call_stack && !flag_pic)))
@@ -11965,7 +11979,7 @@ mips_compute_frame_info (void)
      arguments.  This tends to increase the chances of using unextended
      instructions for local variables and incoming arguments.  */
   if (TARGET_MIPS16)
-    frame->hard_frame_pointer_offset = frame->args_size;
+    frame->hard_frame_pointer_offset = frame->chain_size + frame->args_size;
 
   /* PR 69129 / 69012: Beware of a possible race condition.  mips_global_pointer
      might call mips_cfun_has_inflexible_gp_ref_p which in turn can call
@@ -11982,7 +11996,7 @@ mips_compute_frame_info (void)
   if (cfun->machine->global_pointer != GLOBAL_POINTER_REGNUM)
     df_set_regs_ever_live (GLOBAL_POINTER_REGNUM, false);
 
-  offset = frame->args_size + frame->cprestore_size;
+  offset = frame->chain_size + frame->args_size + frame->cprestore_size;
 
   /* Move above the local variables.  */
   frame->var_size = MIPS_STACK_ALIGN (size);
@@ -11995,7 +12009,10 @@ mips_compute_frame_info (void)
       /* Find out which GPRs we need to save.  */
       for (regno = GP_REG_FIRST + 1; regno <= GP_REG_LAST; regno++)
 	{
-	  if (mips_save_reg_p (regno))
+	  if ((!frame->chain_size
+	       || (regno != HARD_FRAME_POINTER_REGNUM
+		   && regno != RETURN_ADDR_REGNUM))
+	      && mips_save_reg_p (regno))
 	    {
 	      frame->num_gp++;
 	      frame->mask |= 1 << (regno - GP_REG_FIRST);
@@ -12033,6 +12050,10 @@ mips_compute_frame_info (void)
               frame->mask |= 1 << RETURN_ADDR_REGNUM;
             }
         }
+
+      if (frame->chain_size > 0)
+	frame->mask |= (1 << RETURN_ADDR_REGNUM)
+		       | (1 << HARD_FRAME_POINTER_REGNUM);
 
       /* The MIPS16e SAVE and RESTORE instructions have two ranges of registers:
          $a3-$a0 and $s2-$s8.  If we save one register in the range, we must
@@ -12258,7 +12279,8 @@ mips_initial_elimination_offset (int from, int to)
     {
     case FRAME_POINTER_REGNUM:
       if (FRAME_GROWS_DOWNWARD)
-	offset = (cfun->machine->frame.args_size
+	offset = (cfun->machine->frame.chain_size
+		  + cfun->machine->frame.args_size
 		  + cfun->machine->frame.cprestore_size
 		  + cfun->machine->frame.var_size);
       else
@@ -12364,12 +12386,13 @@ mips_get_cprestore_base_and_offset (rtx *base, HOST_WIDE_INT *offset,
   if (frame_pointer_needed && !(TARGET_CPRESTORE_DIRECTIVE && !load_p))
     {
       *base = hard_frame_pointer_rtx;
-      *offset = frame->args_size - frame->hard_frame_pointer_offset;
+      *offset = frame->chain_size + frame->args_size
+		- frame->hard_frame_pointer_offset;
     }
   else
     {
       *base = stack_pointer_rtx;
-      *offset = frame->args_size;
+      *offset = frame->chain_size + frame->args_size;
     }
 }
 
@@ -12643,6 +12666,13 @@ mips_for_each_saved_gpr_and_fpr (HOST_WIDE_INT sp_offset,
 
   if (TARGET_MICROMIPS)
     umips_build_save_restore (fn, &mask, &offset);
+  else if (frame->chain_size > 0)
+    {
+      mask &= ~0xc0000000;
+      mips_save_restore_reg (Pmode, HARD_FRAME_POINTER_REGNUM,
+			     GPR_STACK_UNITS, fn);
+      mips_save_restore_reg (Pmode, RETURN_ADDR_REGNUM, 0, fn);
+    }
 
   for (regno = GP_REG_LAST; regno >= GP_REG_FIRST; regno--)
     if (BITSET_P (mask, regno - GP_REG_FIRST))
@@ -12820,7 +12850,7 @@ mips_output_function_prologue (FILE *file)
 		: frame->total_size),
 	       reg_names[RETURN_ADDR_REGNUM],
 	       frame->var_size,
-	       frame->num_gp, frame->num_fp,
+	       frame->num_gp + (frame->chain_size ? 2 : 0), frame->num_fp,
 	       frame->args_size,
 	       frame->cprestore_size);
 
@@ -13366,7 +13396,8 @@ mips_expand_prologue (void)
      bytes beforehand; this is enough to cover the register save area
      without going out of range.  */
   if (((frame->mask | frame->fmask | frame->acc_mask) != 0)
-      || frame->num_cop0_regs > 0)
+      || frame->num_cop0_regs > 0
+      || frame->chain_size > 0)
     {
       HOST_WIDE_INT step1;
       bool use_handlers_p;
@@ -13941,8 +13972,13 @@ mips_expand_epilogue (rtx_call_insn *call)
 	       && mips_unsigned_immediate_p (step2, 5, 2))
 	use_jraddiusp_p = true;
       else if (restore_mode < 2)
-	/* Deallocate the final bit of the frame.  */
-	mips_deallocate_stack (stack_pointer_rtx, GEN_INT (step2), 0);
+	{
+	  if (step2 != 0)
+	    /* Deallocate the final bit of the frame.  */
+	    mips_deallocate_stack (stack_pointer_rtx, GEN_INT (step2), 0);
+	  else if (frame->chain_size)
+	    mips_epilogue_emit_cfa_restores ();
+	}
     }
 
   if (cfun->machine->use_frame_header_for_callee_saved_regs)
@@ -19058,9 +19094,11 @@ r10k_uncached_address_p (unsigned HOST_WIDE_INT address)
 static bool
 r10k_safe_address_p (rtx x, rtx_insn *insn)
 {
+  const struct mips_frame_info *frame;
   rtx base, offset;
   HOST_WIDE_INT offset_val;
 
+  frame = &cfun->machine->frame;
   x = r10k_simplify_address (x, insn);
 
   /* Check for references to the stack frame.  It doesn't really matter
@@ -19069,8 +19107,8 @@ r10k_safe_address_p (rtx x, rtx_insn *insn)
      is safe from speculation at any point in the function.  */
   mips_split_plus (x, &base, &offset_val);
   if (base == virtual_incoming_args_rtx
-      && offset_val >= -cfun->machine->frame.total_size
-      && offset_val < cfun->machine->frame.args_size)
+      && offset_val >= -frame->total_size
+      && offset_val < frame->chain_size + frame->args_size)
     return true;
 
   /* Check for uncached addresses.  */
@@ -22792,7 +22830,8 @@ void mips_function_profiler (FILE *file)
     {
       /* If TARGET_MCOUNT_RA_ADDRESS load $12 with the address of the
 	 ra save location.  */
-      if (cfun->machine->frame.ra_fp_offset == 0)
+      if (cfun->machine->frame.ra_fp_offset == 0
+	  && cfun->machine->frame.chain_size == 0)
 	/* ra not saved, pass zero.  */
 	fprintf (file, "\tmove\t%s,%s\n", reg_names[12], reg_names[0]);
       else
@@ -24239,7 +24278,7 @@ mips_starting_frame_offset (void)
 {
   if (FRAME_GROWS_DOWNWARD)
     return 0;
-  return crtl->outgoing_args_size + MIPS_GP_SAVE_AREA_SIZE;
+  return FRAME_CHAIN_SIZE + crtl->outgoing_args_size + MIPS_GP_SAVE_AREA_SIZE;
 }
 
 static void
