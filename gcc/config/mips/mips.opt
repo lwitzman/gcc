@@ -290,6 +290,10 @@ mgpopt
 Target Var(TARGET_GPOPT) Init(1)
 Use GP-relative addressing to access small data.
 
+mzeroopt
+Target Var(TARGET_ZEROOPT)
+Use the zero register as the GP base.
+
 mplt
 Target Var(TARGET_PLT)
 When generating -mabicalls code, allow executables to use PLTs and copy relocations.

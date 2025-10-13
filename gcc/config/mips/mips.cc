@@ -2409,7 +2409,7 @@ mips_classify_symbol (const_rtx x, enum mips_symbol_context context)
 	return SYMBOL_PC_RELATIVE;
 
       if (mips_rtx_constant_in_small_data_p (get_pool_mode (x)))
-	return SYMBOL_GP_RELATIVE;
+	return TARGET_ZEROOPT ? SYMBOL_ZERO_RELATIVE : SYMBOL_GP_RELATIVE;
 
       return SYMBOL_ABSOLUTE;
     }
@@ -2418,6 +2418,18 @@ mips_classify_symbol (const_rtx x, enum mips_symbol_context context)
      being zero.  */
   if (SYMBOL_REF_SMALL_P (x) && !SYMBOL_REF_WEAK (x))
     {
+      const_tree decl;
+      const char *name;
+
+      if (TARGET_ZEROOPT)
+	return SYMBOL_ZERO_RELATIVE;
+      decl = SYMBOL_REF_DECL (x);
+      if (decl && TREE_CODE (decl) == VAR_DECL && DECL_SECTION_NAME (decl))
+	{
+	  name = DECL_SECTION_NAME (decl);
+	  if (strcmp (name, ".zpdata") == 0 || strcmp (name, ".zpbss") == 0)
+	    return SYMBOL_ZERO_RELATIVE;
+	}
       if (TARGET_GPOPT)
 	return SYMBOL_GP_RELATIVE;
       return SYMBOL_ABSOLUTE;
@@ -2543,6 +2555,7 @@ mips_symbolic_constant_p (rtx x, enum mips_symbol_context context,
       /* Fall through.  */
 
     case SYMBOL_GP_RELATIVE:
+    case SYMBOL_ZERO_RELATIVE:
       /* Make sure that the offset refers to something within the
 	 same object block.  This should guarantee that the final
 	 PC- or GP-relative offset is within the 16-bit limit.  */
@@ -2615,6 +2628,7 @@ mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode, rtx addr)
 	      ? 6
 	      : (TARGET_MIPS16 && !ISA_HAS_MIPS16E2) ? 3 : 2;
 
+    case SYMBOL_ZERO_RELATIVE:
     case SYMBOL_GP_RELATIVE:
       /* Treat GP-relative accesses as taking a single instruction on
 	 MIPS16 too; the copy of $gp can often be shared.  */
@@ -3770,6 +3784,11 @@ mips_split_symbol (rtx temp, rtx addr, machine_mode mode, rtx *low_out)
 		*low_out = gen_rtx_LO_SUM (Pmode, high, addr);
 		break;
 
+	      case SYMBOL_ZERO_RELATIVE:
+		high = gen_rtx_REG (Pmode, GP_REG_FIRST + 0);
+		*low_out = gen_rtx_LO_SUM (Pmode, high, addr);
+		break;
+
 	      case SYMBOL_PC_RELATIVE:
 		if (TARGET_TEXT_PIC)
 		  {
@@ -4181,14 +4200,15 @@ mips_legitimize_move (machine_mode mode, rtx dest, rtx src)
    that can be rewritten as a LO_SUM.  */
 
 static bool
-mips_rewrite_small_data_p (rtx x, enum mips_symbol_context context)
+mips_rewrite_small_data_p (rtx x, enum mips_symbol_context context,
+			   enum mips_symbol_type *symbol_type)
 {
-  enum mips_symbol_type symbol_type;
-
-  return (mips_lo_relocs[SYMBOL_GP_RELATIVE]
-	  && !mips_split_p[SYMBOL_GP_RELATIVE]
-	  && mips_symbolic_constant_p (x, context, &symbol_type)
-	  && symbol_type == SYMBOL_GP_RELATIVE);
+  if (!mips_symbolic_constant_p (x, context, symbol_type))
+    return false;
+  if (*symbol_type == SYMBOL_GP_RELATIVE
+      || *symbol_type == SYMBOL_ZERO_RELATIVE)
+    return (mips_lo_relocs[*symbol_type] && !mips_split_p[*symbol_type]);
+  return false;
 }
 
 /* Return true if OP refers to small data symbols directly, not through
@@ -4197,6 +4217,7 @@ mips_rewrite_small_data_p (rtx x, enum mips_symbol_context context)
 static int
 mips_small_data_pattern_1 (rtx x, enum mips_symbol_context context)
 {
+  enum mips_symbol_type symbol_type;
   subrtx_var_iterator::array_type array;
   FOR_EACH_SUBRTX_VAR (iter, array, x, ALL)
     {
@@ -4213,7 +4234,7 @@ mips_small_data_pattern_1 (rtx x, enum mips_symbol_context context)
 	    return true;
 	  iter.skip_subrtxes ();
 	}
-      else if (mips_rewrite_small_data_p (x, context))
+      else if (mips_rewrite_small_data_p (x, context, &symbol_type))
 	return true;
     }
   return false;
@@ -4234,6 +4255,7 @@ mips_small_data_pattern_p (rtx op)
 static void
 mips_rewrite_small_data_1 (rtx *loc, enum mips_symbol_context context)
 {
+  enum mips_symbol_type symbol_type;
   subrtx_ptr_iterator::array_type array;
   FOR_EACH_SUBRTX_PTR (iter, array, loc, ALL)
     {
@@ -4243,9 +4265,13 @@ mips_rewrite_small_data_1 (rtx *loc, enum mips_symbol_context context)
 	  mips_rewrite_small_data_1 (&XEXP (*loc, 0), SYMBOL_CONTEXT_MEM);
 	  iter.skip_subrtxes ();
 	}
-      else if (mips_rewrite_small_data_p (*loc, context))
+      else if (mips_rewrite_small_data_p (*loc, context, &symbol_type))
 	{
-	  *loc = gen_rtx_LO_SUM (Pmode, pic_offset_table_rtx, *loc);
+	  rtx base;
+	  base = symbol_type == SYMBOL_ZERO_RELATIVE
+		 ? gen_rtx_REG (Pmode, GP_REG_FIRST + 0)
+		 : pic_offset_table_rtx;
+	  *loc = gen_rtx_LO_SUM (Pmode, base, *loc);
 	  iter.skip_subrtxes ();
 	}
       else if (GET_CODE (*loc) == LO_SUM)
@@ -9672,6 +9698,9 @@ mips_init_relocs (void)
 
   if (TARGET_EXPLICIT_RELOCS)
     {
+      if (TARGET_MIPS16)
+	mips_split_p[SYMBOL_ZERO_RELATIVE] = true;
+      mips_lo_relocs[SYMBOL_ZERO_RELATIVE] = "%zprel(";
       mips_split_p[SYMBOL_GOT_PAGE_OFST] = true;
       if (TARGET_NEWABI)
 	{
@@ -10376,12 +10405,15 @@ mips_in_small_data_p (const_tree decl)
 
       /* Reject anything that isn't in a known small-data section.  */
       name = DECL_SECTION_NAME (decl);
-      if (strcmp (name, ".sdata") != 0 && strcmp (name, ".sbss") != 0)
+      if (strcmp (name, ".sdata") != 0 && strcmp (name, ".sbss") != 0
+	  && strcmp (name, ".zpdata") != 0 && strcmp (name, ".zpbss") != 0)
 	return false;
 
       /* If a symbol is defined externally, the assembler will use the
 	 usual -G rules when deciding how to implement macros.  */
-      if (mips_lo_relocs[SYMBOL_GP_RELATIVE] || !DECL_EXTERNAL (decl))
+      if ((name[1] == 's' && mips_lo_relocs[SYMBOL_GP_RELATIVE])
+	  || (name[1] == 'z' && mips_lo_relocs[SYMBOL_ZERO_RELATIVE])
+	  || !DECL_EXTERNAL (decl))
 	return true;
     }
   else if (TARGET_EMBEDDED_DATA)
@@ -10428,6 +10460,7 @@ mips_use_anchors_for_symbol_p (const_rtx symbol)
     {
     case SYMBOL_PC_RELATIVE:
     case SYMBOL_GP_RELATIVE:
+    case SYMBOL_ZERO_RELATIVE:
       return false;
 
     default:
@@ -22051,6 +22084,9 @@ mips_option_override (void)
   if (TARGET_UABI
       && optimize_size && (target_flags_explicit & MASK_SAVE_RESTORE) == 0)
     target_flags |= MASK_SAVE_RESTORE;
+
+  if (TARGET_ZEROOPT)
+      TARGET_GPOPT = 1;
 
   /* If we have a nonzero small-data limit, check that the -mgpopt
      setting is consistent with the other target flags.  */
