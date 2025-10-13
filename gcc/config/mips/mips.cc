@@ -1085,6 +1085,19 @@ static const struct mips_rtx_cost_data
 		     1,           /* branch_cost */
 		     4            /* memory_latency */
   },
+  { /* SGI RSP */
+    COSTS_N_INSNS (6),            /* fp_add */
+    COSTS_N_INSNS (7),            /* fp_mult_sf */
+    COSTS_N_INSNS (8),            /* fp_mult_df */
+    COSTS_N_INSNS (23),           /* fp_div_sf */
+    COSTS_N_INSNS (36),           /* fp_div_df */
+    COSTS_N_INSNS (10),           /* int_mult_si */
+    COSTS_N_INSNS (10),           /* int_mult_di */
+    COSTS_N_INSNS (20),           /* int_div_si */
+    COSTS_N_INSNS (20),           /* int_div_di */
+		     2,           /* branch_cost */
+		     3            /* memory_latency */
+  },
   { /* SB1 */
     /* These costs are the same as the SB-1A below.  */
     COSTS_N_INSNS (4),            /* fp_add */
@@ -2468,6 +2481,9 @@ mips_classify_symbol (const_rtx x, enum mips_symbol_context context)
       return SYMBOL_GOT_PAGE_OFST;
     }
 
+  if (POINTER_SIZE <= 16)
+    return SYMBOL_ZERO_RELATIVE;
+
   return SYMBOL_ABSOLUTE;
 }
 
@@ -2626,7 +2642,9 @@ mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode, rtx addr)
 	 a preparatory LI and SLL for MIPS16.  */
       return ABI_HAS_64BIT_SYMBOLS
 	      ? 6
-	      : (TARGET_MIPS16 && !ISA_HAS_MIPS16E2) ? 3 : 2;
+	      : (POINTER_SIZE <= 16)
+		? 1
+		: (TARGET_MIPS16 && !ISA_HAS_MIPS16E2) ? 3 : 2;
 
     case SYMBOL_ZERO_RELATIVE:
     case SYMBOL_GP_RELATIVE:
@@ -2642,7 +2660,8 @@ mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode, rtx addr)
 	    {
 	      if (ABI_HAS_64BIT_SYMBOLS)
 		return 8;
-	      return 4;
+	      if (Pmode != HImode)
+		return 4;
 	    }
 	  return 2;
 	}
@@ -3709,7 +3728,8 @@ mips_split_pcrel_symbol (rtx temp, rtx addr)
 {
   rtx_insn *insn;
 
-  if (GET_CODE (addr) == SYMBOL_REF && SYMBOL_REF_LONG_CALL_P (addr))
+  if (Pmode != HImode && GET_CODE (addr) == SYMBOL_REF
+      && SYMBOL_REF_LONG_CALL_P (addr))
     {
       if (ABI_HAS_64BIT_SYMBOLS)
 	insn = emit_insn (gen_get_pcrel_far_di (temp, addr));
@@ -3906,6 +3926,32 @@ mips_get_tp (void)
   return mips_expand_thread_pointer (gen_reg_rtx (Pmode));
 }
 
+static rtx_insn *
+gen_ptr_op (rtx r0, rtx r1, rtx c, bool sub_p)
+{
+  if (POINTER_SIZE <= 16)
+    {
+      if (REG_P (r1))
+	r1 = gen_rtx_REG (SImode, REGNO (r1));
+      if (REG_P (c))
+	c = gen_rtx_REG (SImode, REGNO (c));
+      r0 = gen_rtx_REG (SImode, REGNO (r0));
+    }
+  return (sub_p ? gen_sub3_insn : gen_add3_insn) (r0, r1, c);
+}
+
+static inline rtx_insn *
+gen_ptr_add (rtx r0, rtx r1, rtx c)
+{
+  return gen_ptr_op (r0, r1, c, false);
+}
+
+static inline rtx_insn *
+gen_ptr_sub (rtx r0, rtx r1, rtx c)
+{
+  return gen_ptr_op (r0, r1, c, true);
+}
+
 /* Generate the code to access LOC, a thread-local SYMBOL_REF, and return
    its address.  The return value will be both a valid address and a valid
    SET_SRC (either a REG or a LO_SUM).  */
@@ -3967,7 +4013,7 @@ mips_legitimize_tls_address (rtx loc)
       else
 	emit_insn (gen_load_gotsi (tmp1, pic_offset_table_rtx, tmp2));
       dest = gen_reg_rtx (Pmode);
-      emit_insn (gen_add3_insn (dest, tmp1, tp));
+      emit_insn (gen_ptr_add (dest, tmp1, tp));
       break;
 
     case TLS_MODEL_LOCAL_EXEC:
@@ -9675,8 +9721,11 @@ mips_init_relocs (void)
 	      || mips_split_addresses_p ()
 	      || TARGET_MIPS16)
 	    {
-	      mips_split_p[SYMBOL_ABSOLUTE] = true;
-	      mips_hi_relocs[SYMBOL_ABSOLUTE] = "%hi(";
+	      if (POINTER_SIZE > 16)
+		{
+		  mips_split_p[SYMBOL_ABSOLUTE] = true;
+		  mips_hi_relocs[SYMBOL_ABSOLUTE] = "%hi(";
+		}
 	      mips_lo_relocs[SYMBOL_ABSOLUTE] = "%lo(";
 	    }
 	}
@@ -9700,7 +9749,8 @@ mips_init_relocs (void)
     {
       if (TARGET_MIPS16)
 	mips_split_p[SYMBOL_ZERO_RELATIVE] = true;
-      mips_lo_relocs[SYMBOL_ZERO_RELATIVE] = "%zprel(";
+      mips_lo_relocs[SYMBOL_ZERO_RELATIVE]
+	= POINTER_SIZE <= 16 ? "%lo(" : "%zprel(";
       mips_split_p[SYMBOL_GOT_PAGE_OFST] = true;
       if (TARGET_NEWABI)
 	{
@@ -13365,10 +13415,10 @@ mips_emit_4300_stack_cache_op (HOST_WIDE_INT size, long op, unsigned tmpreg)
 	size = MIN (size, (HOST_WIDE_INT) mips_dcache_size);
 
       tr = gen_rtx_REG (Pmode, tmpreg);
-      emit_insn (gen_add3_insn (tr, stack_pointer_rtx, GEN_INT (-size)));
+      emit_insn (gen_ptr_add (tr, stack_pointer_rtx, GEN_INT (-size)));
       label = gen_label_rtx ();
       emit_label (label);
-      emit_insn (gen_add3_insn (tr, tr, GEN_INT (linesize)));
+      emit_insn (gen_ptr_add (tr, tr, GEN_INT (linesize)));
       emit_insn (gen_mips_cache (GEN_INT (op),
 				 plus_constant (Pmode, tr, -linesize)));
       tmp = gen_rtx_NE (Pmode, tr, stack_pointer_rtx);
@@ -13390,8 +13440,8 @@ mips_emit_save_libcall (HOST_WIDE_INT sp_offset)
   if (frame->gpr_libcall_p)
     {
       offset = frame->gp_sp_offset - sp_offset + GPR_STACK_UNITS;
-      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
-				stack_pointer_rtx, GEN_INT (offset)));
+      emit_insn (gen_ptr_add (gen_rtx_REG (Pmode, AT_REGNUM),
+			      stack_pointer_rtx, GEN_INT (offset)));
 
       num = popcount_hwi (frame->mask & (frame->gpr_includes_fp_p
 					 ? 0x40ff0000 : 0x00ff0000));
@@ -13407,8 +13457,8 @@ mips_emit_save_libcall (HOST_WIDE_INT sp_offset)
   if (frame->fpr_libcall_p)
     {
       offset = frame->fp_sp_offset - sp_offset + HWFPR_STACK_UNITS;
-      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
-				stack_pointer_rtx, GEN_INT (offset)));
+      emit_insn (gen_ptr_add (gen_rtx_REG (Pmode, AT_REGNUM),
+			      stack_pointer_rtx, GEN_INT (offset)));
 
       num = popcount_hwi (frame->fmask & 0xfff00000);
       insn = emit_insn (gen_fpr_save (GEN_INT (num)));
@@ -13469,8 +13519,8 @@ mips_emit_restore_libcall (HOST_WIDE_INT sp_offset, rtx_call_insn *sibcall,
       num = GEN_INT (popcount_hwi (frame->mask & (frame->gpr_includes_fp_p
 						  ? 0x40ff0000 : 0x00ff0000)));
       offset = frame->gp_sp_offset - sp_offset + GPR_STACK_UNITS;
-      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
-				stack_pointer_rtx, GEN_INT (offset)));
+      emit_insn (gen_ptr_add (gen_rtx_REG (Pmode, AT_REGNUM),
+			      stack_pointer_rtx, GEN_INT (offset)));
 
       ctail_p = tail_p && !frame->fpr_libcall_p;
       if (ctail_p)
@@ -13492,8 +13542,8 @@ mips_emit_restore_libcall (HOST_WIDE_INT sp_offset, rtx_call_insn *sibcall,
     {
       num = GEN_INT (popcount_hwi (frame->fmask & 0xfff00000));
       offset = frame->fp_sp_offset - sp_offset + HWFPR_STACK_UNITS;
-      emit_insn (gen_add3_insn (gen_rtx_REG (Pmode, AT_REGNUM),
-				stack_pointer_rtx, GEN_INT (offset)));
+      emit_insn (gen_ptr_add (gen_rtx_REG (Pmode, AT_REGNUM),
+			      stack_pointer_rtx, GEN_INT (offset)));
 
       ctail_p = tail_p && frame->gpr_libcall_p;
       if (ctail_p)
@@ -13642,8 +13692,8 @@ mips_expand_prologue (void)
 						     COP0_EPC_REG_NUM)));
 
 	      /* Allocate the first part of the frame.  */
-	      rtx insn = gen_add3_insn (stack_pointer_rtx, stack_pointer_rtx,
-					GEN_INT (-step1));
+	      rtx insn = gen_ptr_add (stack_pointer_rtx, stack_pointer_rtx,
+				      GEN_INT (-step1));
 	      RTX_FRAME_RELATED_P (emit_insn (insn)) = 1;
 	      mips_frame_barrier ();
 	      size -= step1;
@@ -13734,9 +13784,9 @@ mips_expand_prologue (void)
 	    {
 	      if (step1 != 0)
 		{
-		  rtx insn = gen_add3_insn (stack_pointer_rtx,
-					    stack_pointer_rtx,
-					    GEN_INT (-step1));
+		  rtx insn = gen_ptr_add (stack_pointer_rtx,
+					  stack_pointer_rtx,
+					  GEN_INT (-step1));
 		  RTX_FRAME_RELATED_P (emit_insn (insn)) = 1;
 		  mips_frame_barrier ();
 		  size -= step1;
@@ -13759,9 +13809,9 @@ mips_expand_prologue (void)
   if (size > 0)
     {
       if (SMALL_OPERAND (-size))
-	RTX_FRAME_RELATED_P (emit_insn (gen_add3_insn (stack_pointer_rtx,
-						       stack_pointer_rtx,
-						       GEN_INT (-size)))) = 1;
+	RTX_FRAME_RELATED_P (emit_insn (gen_ptr_add (stack_pointer_rtx,
+						     stack_pointer_rtx,
+						     GEN_INT (-size)))) = 1;
       else
 	{
 	  mips_emit_move (MIPS_PROLOGUE_TEMP (Pmode), GEN_INT (size));
@@ -13773,15 +13823,15 @@ mips_expand_prologue (void)
 		 in this case anyway.  */
 	      gcc_assert (frame_pointer_needed);
 	      mips_emit_move (hard_frame_pointer_rtx, stack_pointer_rtx);
-	      emit_insn (gen_sub3_insn (hard_frame_pointer_rtx,
-					hard_frame_pointer_rtx,
-					MIPS_PROLOGUE_TEMP (Pmode)));
+	      emit_insn (gen_ptr_sub (hard_frame_pointer_rtx,
+				      hard_frame_pointer_rtx,
+				      MIPS_PROLOGUE_TEMP (Pmode)));
 	      mips_emit_move (stack_pointer_rtx, hard_frame_pointer_rtx);
 	    }
 	  else
-	    emit_insn (gen_sub3_insn (stack_pointer_rtx,
-				      stack_pointer_rtx,
-				      MIPS_PROLOGUE_TEMP (Pmode)));
+	    emit_insn (gen_ptr_sub (stack_pointer_rtx,
+				    stack_pointer_rtx,
+				    MIPS_PROLOGUE_TEMP (Pmode)));
 
 	  /* Describe the combined effect of the previous instructions.  */
 	  mips_set_frame_expr
@@ -13807,17 +13857,17 @@ mips_expand_prologue (void)
 	}
       else if (SMALL_OPERAND (offset))
 	{
-	  rtx insn = gen_add3_insn (hard_frame_pointer_rtx,
-				    stack_pointer_rtx, GEN_INT (offset));
+	  rtx insn = gen_ptr_add (hard_frame_pointer_rtx,
+				  stack_pointer_rtx, GEN_INT (offset));
 	  RTX_FRAME_RELATED_P (emit_insn (insn)) = 1;
 	}
       else
 	{
 	  mips_emit_move (MIPS_PROLOGUE_TEMP (Pmode), GEN_INT (offset));
 	  mips_emit_move (hard_frame_pointer_rtx, stack_pointer_rtx);
-	  emit_insn (gen_add3_insn (hard_frame_pointer_rtx,
-				    hard_frame_pointer_rtx,
-				    MIPS_PROLOGUE_TEMP (Pmode)));
+	  emit_insn (gen_ptr_add (hard_frame_pointer_rtx,
+				  hard_frame_pointer_rtx,
+				  MIPS_PROLOGUE_TEMP (Pmode)));
 	  mips_set_frame_expr
 	    (gen_rtx_SET (hard_frame_pointer_rtx,
 			  plus_constant (Pmode, stack_pointer_rtx, offset)));
@@ -13953,13 +14003,13 @@ mips_deallocate_stack (rtx base, rtx offset, HOST_WIDE_INT new_frame_size)
     }
   else if (TARGET_MIPS16 && base != stack_pointer_rtx)
     {
-      emit_insn (gen_add3_insn (base, base, offset));
+      emit_insn (gen_ptr_add (base, base, offset));
       mips_epilogue_set_cfa (base, new_frame_size);
       emit_move_insn (stack_pointer_rtx, base);
     }
   else
     {
-      emit_insn (gen_add3_insn (stack_pointer_rtx, base, offset));
+      emit_insn (gen_ptr_add (stack_pointer_rtx, base, offset));
       mips_epilogue_set_cfa (stack_pointer_rtx, new_frame_size);
     }
 }
@@ -14201,15 +14251,15 @@ mips_expand_epilogue (rtx_call_insn *call)
       if (TARGET_MIPS16)
 	{
 	  mips_emit_move (MIPS_EPILOGUE_TEMP (Pmode), stack_pointer_rtx);
-	  emit_insn (gen_add3_insn (MIPS_EPILOGUE_TEMP (Pmode),
-				    MIPS_EPILOGUE_TEMP (Pmode),
-				    EH_RETURN_STACKADJ_RTX));
+	  emit_insn (gen_ptr_add (MIPS_EPILOGUE_TEMP (Pmode),
+				  MIPS_EPILOGUE_TEMP (Pmode),
+				  EH_RETURN_STACKADJ_RTX));
 	  mips_emit_move (stack_pointer_rtx, MIPS_EPILOGUE_TEMP (Pmode));
 	}
       else
-	emit_insn (gen_add3_insn (stack_pointer_rtx,
-				  stack_pointer_rtx,
-				  EH_RETURN_STACKADJ_RTX));
+	emit_insn (gen_ptr_add (stack_pointer_rtx,
+				stack_pointer_rtx,
+				EH_RETURN_STACKADJ_RTX));
     }
 
   if (restore_mode < 2)
@@ -15044,6 +15094,8 @@ mips_mode_rep_extended (scalar_int_mode mode, scalar_int_mode mode_rep)
 static bool
 mips_valid_pointer_mode (scalar_int_mode mode)
 {
+  if (TARGET_RSP)
+    return mode == HImode;
   return mode == SImode || (TARGET_64BIT && mode == DImode);
 }
 
@@ -16321,6 +16373,7 @@ mips_issue_rate (void)
          processors to support this feature). */
       return 4;
 
+    case PROCESSOR_RSP:
     case PROCESSOR_20KC:
     case PROCESSOR_R4130:
     case PROCESSOR_R5400:
@@ -21337,7 +21390,7 @@ mips_output_mi_thunk (FILE *file, tree thunk_fndecl ATTRIBUTE_UNUSED,
 	  mips_emit_move (temp1, offset);
 	  offset = temp1;
 	}
-      emit_insn (gen_add3_insn (this_rtx, this_rtx, offset));
+      emit_insn (gen_ptr_add (this_rtx, this_rtx, offset));
     }
 
   /* If needed, add *(*THIS_RTX + VCALL_OFFSET) to THIS_RTX.  */
@@ -21353,7 +21406,7 @@ mips_output_mi_thunk (FILE *file, tree thunk_fndecl ATTRIBUTE_UNUSED,
 
       /* Load the offset and add it to THIS_RTX.  */
       mips_emit_move (temp1, gen_rtx_MEM (Pmode, addr));
-      emit_insn (gen_add3_insn (this_rtx, this_rtx, temp1));
+      emit_insn (gen_ptr_add (this_rtx, this_rtx, temp1));
     }
 
   /* Jump to the target function.  Use a sibcall if direct jumps are
@@ -21489,6 +21542,9 @@ mips_set_compression_mode (unsigned int compression_mode)
       if (TARGET_MSA)
 	sorry ("MSA MIPS16 code");
 
+      if (TARGET_RSP)
+	sorry ("RSP MIPS16 code");
+
       if (!TARGET_EXPLICIT_RELOCS)
 	sorry ("MIPS16 requires %<-mexplicit-relocs%>");
 
@@ -21503,6 +21559,9 @@ mips_set_compression_mode (unsigned int compression_mode)
 	{
 	  /* Avoid branch likely.  */
 	  target_flags &= ~MASK_BRANCHLIKELY;
+
+	  if (TARGET_RSP)
+	    sorry ("RSP microMIPS code");
 
 	  if (TARGET_TEXT_PIC)
 	    sorry ("microMIPS %<-fpic -mno-abicalls%> code");
@@ -22170,6 +22229,18 @@ mips_option_override (void)
   if (ISA_HAS_MSA && !(TARGET_FLOAT64 && TARGET_HARD_FLOAT_ABI))
     error ("%<-mmsa%> must be used with %<-mfp64%> and %<-mhard-float%>");
 
+  if (TARGET_RSP && !TARGET_SOFT_FLOAT_ABI)
+    error ("%<-march=rsp%> must be used with %<-msoft-float%>");
+
+  if (TARGET_RSP && (mips_base_compression_flags & MASK_MIPS16) != 0)
+    error ("unsupported combination: %s", "-march=rsp -mips16");
+
+  if (TARGET_RSP && (mips_base_compression_flags & MASK_MICROMIPS) != 0)
+    error ("unsupported combination: %s", "-march=rsp -mmicromips");
+
+  if (TARGET_RSP && TARGET_LITTLE_ENDIAN)
+    error ("unsupported combination: %s", "-march=rsp -EL");
+
   /* Make sure that -mpaired-single is only used on ISAs that support it.
      We must disable it otherwise since it relies on other ISA properties
      like ISA_HAS_8CC having their normal values.  */
@@ -22193,7 +22264,7 @@ mips_option_override (void)
   if (TARGET_DSPR2)
     TARGET_DSP = true;
 
-  if (TARGET_DSP && mips_isa_rev >= 6)
+  if (TARGET_DSP && (mips_isa_rev >= 6 || TARGET_RSP))
     {
       error ("the %qs architecture does not support DSP instructions",
 	     mips_arch_info->name);
@@ -22681,6 +22752,8 @@ mips_mulsidi3_gen_fn (enum rtx_code ext_code)
     }
   else
     {
+      if (TARGET_RSP)
+	return NULL;
       if (ISA_HAS_R6MUL)
 	return (signed_p ? gen_mulsidi3_32bit_r6 : gen_umulsidi3_32bit_r6);
       if (TARGET_MIPS16)
@@ -23194,7 +23267,7 @@ mips_trampoline_init (rtx m_tramp, tree fndecl, rtx chain_value)
   mips_emit_move (mem, XEXP (DECL_RTL (fndecl), 0));
 
   /* Flush the code part of the trampoline.  */
-  emit_insn (gen_add3_insn (end_addr, addr, GEN_INT (TRAMPOLINE_SIZE)));
+  emit_insn (gen_ptr_add (end_addr, addr, GEN_INT (TRAMPOLINE_SIZE)));
   emit_insn (gen_clear_cache (addr, end_addr));
 }
 

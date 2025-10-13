@@ -257,8 +257,8 @@ struct mips_cpu_info {
 				     || ISA_HAS_MSA))
 
 /* ISA load/store instructions can handle unaligned address */
-#define ISA_HAS_UNALIGNED_ACCESS (!TARGET_STRICT_ALIGN \
-				 && (mips_isa_rev >= 6))
+#define ISA_HAS_UNALIGNED_ACCESS ((!TARGET_STRICT_ALIGN \
+				 && (mips_isa_rev >= 6)) || TARGET_RSP)
 
 /* The ISA compression flags that are currently in effect.  */
 #define TARGET_COMPRESSION (target_flags & (MASK_MIPS16 | MASK_MICROMIPS))
@@ -323,6 +323,7 @@ struct mips_cpu_info {
 				     || mips_arch == PROCESSOR_SB1A)
 #define TARGET_SR71K                (mips_arch == PROCESSOR_SR71000)
 #define TARGET_XLP                  (mips_arch == PROCESSOR_XLP)
+#define TARGET_RSP                  (mips_arch == PROCESSOR_RSP)
 
 /* Scheduling target defines.  */
 #define TUNE_20KC		    (mips_tune == PROCESSOR_20KC)
@@ -508,6 +509,9 @@ struct mips_cpu_info {
 									\
       if (TARGET_EVA)							\
 	builtin_define ("__mips_eva");					\
+									\
+      if (TARGET_RSP)							\
+	  builtin_define ("__mips_rsp");				\
 									\
       if (TARGET_DSP)							\
 	{								\
@@ -1058,7 +1062,7 @@ struct mips_cpu_info {
 				 && !TARGET_MIPS16)
 
 /* ISA has HI and LO registers.  */
-#define ISA_HAS_HILO		(mips_isa_rev <= 5)
+#define ISA_HAS_HILO		(mips_isa_rev <= 5 && !TARGET_RSP)
 
 /* ISA supports instructions DMULT and DMULTU. */
 #define ISA_HAS_DMULT		(TARGET_64BIT				\
@@ -1066,7 +1070,7 @@ struct mips_cpu_info {
 				 && mips_isa_rev <= 5)
 
 /* ISA supports instructions MULT and MULTU.  */
-#define ISA_HAS_MULT		(mips_isa_rev <= 5)
+#define ISA_HAS_MULT		(mips_isa_rev <= 5 && !TARGET_RSP)
 
 /* ISA supports instructions MUL, MULU, MUH, MUHU.  */
 #define ISA_HAS_R6MUL		(mips_isa_rev >= 6)
@@ -1092,7 +1096,7 @@ struct mips_cpu_info {
    This is always true, but the macro is needed for ISA_HAS_<D>DIV
    in mips.md.  */
 #define ISA_HAS_DIV		(!ISA_AVOID_DIV_HILO			\
-				 && mips_isa_rev <= 5)
+				 && mips_isa_rev <= 5 && !TARGET_RSP)
 
 /* ISA supports instructions DIV, DIVU, MOD and MODU.  */
 #define ISA_HAS_R6DIV		(mips_isa_rev >= 6)
@@ -1212,7 +1216,7 @@ struct mips_cpu_info {
 				 && !TARGET_MIPS16)
 
 #define ISA_HAS_LWL_LWR		(mips_isa_rev <= 5 \
-				 && (!TARGET_MIPS16 || ISA_HAS_MIPS16E2))
+				 && (!TARGET_MIPS16 || ISA_HAS_MIPS16E2) && !TARGET_RSP)
 
 #define ISA_HAS_IEEE_754_LEGACY	(mips_isa_rev <= 5)
 
@@ -1346,7 +1350,8 @@ struct mips_cpu_info {
 				 && !TARGET_MIPS3900			\
 				 && !TARGET_MIPS5900			\
 				 && !TARGET_MIPS16			\
-				 && !TARGET_MICROMIPS)
+				 && !TARGET_MICROMIPS			\
+				 && !TARGET_RSP)
 
 /* Likewise mtc1 and mfc1.  */
 #define ISA_HAS_XFER_DELAY	(mips_isa <= MIPS_ISA_MIPS3	\
@@ -1720,7 +1725,8 @@ FP_ASM_SPEC "\
 
 /* Width in bits of a pointer.  */
 #ifndef POINTER_SIZE
-#define POINTER_SIZE ((TARGET_LONG64 && TARGET_64BIT) ? 64 : 32)
+#define POINTER_SIZE \
+  (TARGET_RSP ? 16 : ((TARGET_LONG64 && TARGET_64BIT) ? 64 : 32))
 #endif
 
 /* Allocation boundary (in *bits*) for storing arguments in argument list.  */
@@ -1823,7 +1829,7 @@ FP_ASM_SPEC "\
 
 /* Pmode is always the same as ptr_mode, but not always the same as word_mode.
    Extensions of pointers to word_mode must be signed.  */
-#define POINTERS_EXTEND_UNSIGNED false
+#define POINTERS_EXTEND_UNSIGNED (POINTER_SIZE <= 16)
 
 /* Define if loading short immediate values into registers sign extends.  */
 #define SHORT_IMMEDIATES_SIGN_EXTEND 1
@@ -2705,7 +2711,7 @@ typedef struct mips_args {
 #define TARGET_REL_JUMP_TABLES \
   (TARGET_MIPS16_REL_JUMP_TABLES || TARGET_TEXT_PIC)
 
-#define JUMP_TABLES_IN_TEXT_SECTION TARGET_REL_JUMP_TABLES
+#define JUMP_TABLES_IN_TEXT_SECTION (TARGET_REL_JUMP_TABLES && !TARGET_RSP)
 
 #define CASE_VECTOR_MODE (TARGET_REL_JUMP_TABLES ? SImode : ptr_mode)
 
@@ -2713,11 +2719,12 @@ typedef struct mips_args {
 #define CASE_VECTOR_SHORTEN_MODE(MIN, MAX, BODY)			\
   (!TARGET_REL_JUMP_TABLES ? ptr_mode					\
    : (!TARGET_FORCE_LONG_JUMP_TABLES					\
-       && ((MIN) >= -32768 && (MAX) < 32768))				\
+       && (((MIN) >= -32768 && (MAX) < 32768) || POINTER_SIZE <= 16))	\
      ? HImode : SImode)
 
 #define FORCE_REL_JUMP_MODE						\
-  (TARGET_FORCE_LONG_JUMP_TABLES ? SImode : VOIDmode)
+  (TARGET_FORCE_LONG_JUMP_TABLES ? SImode				\
+   : POINTER_SIZE <= 16 ? HImode : VOIDmode)
 
 #define CASE_VECTOR_PC_RELATIVE TARGET_REL_JUMP_TABLES
 
@@ -2757,7 +2764,9 @@ typedef struct mips_args {
    between pointers and any other objects of this machine mode.  */
 
 #ifndef Pmode
-#define Pmode (TARGET_64BIT && TARGET_LONG64 ? DImode : SImode)
+#define Pmode \
+  (POINTER_SIZE <= 16 ? HImode \
+   : (TARGET_64BIT && TARGET_LONG64 ? DImode : SImode))
 #endif
 
 /* Give call MEMs SImode since it is the "most permissive" mode
@@ -3019,7 +3028,8 @@ while (0)
 
 #define ASM_OUTPUT_ADDR_VEC_ELT(STREAM, VALUE)				\
   fprintf (STREAM, "\t%s\t%sL%d\n",					\
-	   ptr_mode == DImode ? ".dword" : ".word",			\
+	   ptr_mode == HImode ? ".hword"				\
+	     : (ptr_mode == DImode ? ".dword" : ".word"),		\
 	   LOCAL_LABEL_PREFIX,						\
 	   VALUE)
 
@@ -3047,21 +3057,24 @@ do {									\
     }									\
   else if (TARGET_GPWORD)						\
     fprintf (STREAM, "\t%s\t%sL%d\n",					\
-	     ptr_mode == DImode ? ".gpdword" : ".gpword",		\
+	     ptr_mode == HImode ? ".gphword"				\
+	       : (ptr_mode == DImode ? ".gpdword" : ".gpword"),		\
 	     LOCAL_LABEL_PREFIX, VALUE);				\
   else if (TARGET_RTP_PIC)						\
     {									\
       /* Make the entry relative to the start of the function.  */	\
       rtx fnsym = XEXP (DECL_RTL (current_function_decl), 0);		\
       fprintf (STREAM, "\t%s\t%sL%d-",					\
-	       Pmode == DImode ? ".dword" : ".word",			\
+	       Pmode == HImode ? ".hword"				\
+		 : (Pmode == DImode ? ".dword" : ".word"),		\
 	       LOCAL_LABEL_PREFIX, VALUE);				\
       assemble_name (STREAM, XSTR (fnsym, 0));				\
       fprintf (STREAM, "\n");						\
     }									\
   else									\
     fprintf (STREAM, "\t%s\t%sL%d\n",					\
-	     ptr_mode == DImode ? ".dword" : ".word",			\
+	     ptr_mode == HImode ? ".hword"				\
+	       : (ptr_mode == DImode ? ".dword" : ".word"),		\
 	     LOCAL_LABEL_PREFIX, VALUE);				\
 } while (0)
 
@@ -3157,10 +3170,13 @@ while (0)
 #endif
 
 #undef SIZE_TYPE
-#define SIZE_TYPE (POINTER_SIZE == 64 ? "long unsigned int" : "unsigned int")
+#define SIZE_TYPE (POINTER_SIZE <= 16 ? "short unsigned int" \
+		   : (POINTER_SIZE == 64 ? "long unsigned int" \
+		      : "unsigned int"))
 
 #undef PTRDIFF_TYPE
-#define PTRDIFF_TYPE (POINTER_SIZE == 64 ? "long int" : "int")
+#define PTRDIFF_TYPE (POINTER_SIZE <= 16 ? "short int" \
+		      : (POINTER_SIZE == 64 ? "long int" : "int"))
 
 /* The minimum alignment of any expanded block move.  */
 #define MIPS_MIN_MOVE_MEM_ALIGN 16
@@ -3533,7 +3549,7 @@ struct GTY(())  machine_function {
    Add the appropriate suffix to generator function NAME and invoke it
    with arguments ARGS.  */
 #define PMODE_INSN(NAME, ARGS) \
-  (Pmode == SImode ? NAME ## _si ARGS : NAME ## _di ARGS)
+  (Pmode == HImode ? NAME ## _hi ARGS : (Pmode == SImode ? NAME ## _si ARGS : NAME ## _di ARGS))
 
 /* If we are *not* using multilibs and the default ABI is not ABI_32 we
    need to change these from /lib and /usr/lib.  */

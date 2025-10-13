@@ -63,6 +63,7 @@
   r8000
   r9000
   r10000
+  rsp
   sb1
   sb1a
   sr71000
@@ -852,8 +853,8 @@
 (define_mode_iterator HILO [(DI "!TARGET_64BIT") (TI "TARGET_64BIT")])
 
 ;; This mode iterator allows :P to be used for patterns that operate on
-;; pointer-sized quantities.  Exactly one of the two alternatives will match.
-(define_mode_iterator P [(SI "Pmode == SImode") (DI "Pmode == DImode")])
+;; pointer-sized quantities.  Exactly one of the three alternatives will match.
+(define_mode_iterator P [(HI "Pmode == HImode") (SI "Pmode == SImode") (DI "Pmode == DImode")])
 
 ;; This mode iterator allows :MOVECC to be used anywhere that a
 ;; conditional-move-type condition is needed.
@@ -922,14 +923,14 @@
 
 ;; In GPR templates, a string like "<d>subu" will expand to "subu" in the
 ;; 32-bit version and "dsubu" in the 64-bit version.
-(define_mode_attr d [(SI "") (DI "d")
+(define_mode_attr d [(HI "") (SI "") (DI "d")
 		     (QQ "") (HQ "") (SQ "") (DQ "d")
 		     (UQQ "") (UHQ "") (USQ "") (UDQ "d")
 		     (HA "") (SA "") (DA "d")
 		     (UHA "") (USA "") (UDA "d")])
 
 ;; Same as d but upper-case.
-(define_mode_attr D [(SI "") (DI "D")
+(define_mode_attr D [(HI "") (SI "") (DI "D")
 		     (QQ "") (HQ "") (SQ "") (DQ "D")
 		     (UQQ "") (UHQ "") (USQ "") (UDQ "D")
 		     (HA "") (SA "") (DA "D")
@@ -5929,12 +5930,23 @@
 (define_insn "*movhi_internal"
   [(set (match_operand:HI 0 "nonimmediate_operand" "=d,!u,d,!u,d,ZU,m,*a,*d")
 	(match_operand:HI 1 "move_operand"         "d,J,I,ZU,m,!kbJ,dJ,*d*J,*a"))]
-  "!TARGET_MIPS16
+  "!TARGET_MIPS16 && POINTER_SIZE != 16
    && (register_operand (operands[0], HImode)
        || reg_or_0_operand (operands[1], HImode))"
   { return mips_output_move (operands[0], operands[1]); }
   [(set_attr "move_type" "move,const,const,load,load,store,store,mtlo,mflo")
    (set_attr "compression" "all,micromips,*,micromips,*,micromips,*,*,*")
+   (set_attr "mode" "HI")])
+
+(define_insn "*movhi_p16"
+  [(set (match_operand:HI 0 "nonimmediate_operand" "=d,!u,d,!u,d,e,!u,!ks,!u,d,ZS,ZT,ZU,m,*a,*d")
+	(match_operand:HI 1 "move_operand" "d,J,I,Udb7,Yd,Yf,ZT,ZS,ZU,m,!ks,!kbJ,!kbJ,dJ,*J*d,*a"))]
+  "!TARGET_MIPS16 && POINTER_SIZE == 16
+   && (register_operand (operands[0], HImode)
+       || reg_or_0_operand (operands[1], HImode))"
+  { return mips_output_move (operands[0], operands[1]); }
+  [(set_attr "move_type" "move,move,const,const,const,const,load,load,load,load,store,store,store,store,mtlo,mflo")
+   (set_attr "compression" "all,micromips,*,micromips,*,*,micromips,micromips,*,micromips,micromips,micromips,micromips,*,*,*")
    (set_attr "mode" "HI")])
 
 (define_insn "*movhi_mips16"
