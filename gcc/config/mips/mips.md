@@ -135,6 +135,8 @@
   UNSPEC_TLS_LDM
   UNSPEC_TLS_GET_TP
   UNSPEC_UNSHIFTED_HIGH
+  UNSPEC_GET_PCREL_FAR_SI
+  UNSPEC_GET_PCREL_FAR_DI
 
   ;; MIPS16 constant pools.
   UNSPEC_ALIGN
@@ -7409,7 +7411,7 @@
   [(set (pc)
 	(match_operand 0 "register_operand"))
    (use (label_ref (match_operand 1 "")))]
-  "!TARGET_MIPS16_SHORT_JUMP_TABLES"
+  "!TARGET_MIPS16_REL_JUMP_TABLES"
 {
   if (TARGET_GPWORD)
     operands[0] = expand_binop (Pmode, add_optab, operands[0],
@@ -7453,7 +7455,7 @@
    (match_operand:SI 2 "const_int_operand" "")	; total range
    (match_operand 3 "" "")			; table label
    (match_operand 4 "" "")]			; out of range label
-  "TARGET_MIPS16_SHORT_JUMP_TABLES"
+  "TARGET_REL_JUMP_TABLES"
 {
   if (operands[1] != const0_rtx)
     {
@@ -7472,8 +7474,52 @@
 
   emit_cmp_and_jump_insns (operands[0], operands[2], GTU,
 			   NULL_RTX, SImode, 1, operands[4]);
-  emit_jump_insn (PMODE_INSN (gen_casesi_internal_mips16,
-			      (operands[0], operands[3])));
+
+  rtx index;
+
+  if (FORCE_REL_JUMP_MODE != VOIDmode)
+    {
+      rtx shift;
+
+      index = gen_reg_rtx (SImode);
+      shift = GEN_INT (FORCE_REL_JUMP_MODE == HImode ? 1 : 2);
+      mips_emit_binary (ASHIFT, index, operands[0], shift);
+    }
+  else
+    index = operands[0];
+
+  if (TARGET_MIPS16)
+    emit_jump_insn (PMODE_INSN (gen_casesi_internal_mips16,
+				(index, operands[3])));
+  else
+    {
+      rtx_insn *jump;
+      rtx base;
+      rtx table = gen_reg_rtx (Pmode);
+      rtx reg = gen_reg_rtx (Pmode);
+
+      if (JUMP_TABLES_IN_TEXT_SECTION)
+	{
+	  emit_insn (PMODE_INSN (gen_get_pcrel_near, (table, operands[3])));
+	  base = table;
+	}
+      else
+	{
+	  rtx fnsym = XEXP (DECL_RTL (current_function_decl), 0);
+
+	  base = gen_reg_rtx (Pmode);
+	  emit_insn (PMODE_INSN (gen_get_pcrel_near, (base, fnsym)));
+	  mips_emit_move (table, operands[3]);
+	}
+
+      emit_insn (PMODE_INSN (gen_casesi_internal,
+			     (reg, index, table, operands[3])));
+      mips_emit_move (reg, gen_rtx_PLUS (Pmode, reg, base));
+      jump = emit_jump_insn (gen_indirect_jump (reg));
+      emit_barrier ();
+      JUMP_LABEL (jump) = operands[3];
+      LABEL_NUSES (operands[3])++;
+    }
   DONE;
 })
 
@@ -7484,31 +7530,36 @@
 	 UNSPEC_CASESI_DISPATCH))
    (clobber (match_scratch:P 2 "=d"))
    (clobber (match_scratch:P 3 "=d"))]
-  "TARGET_MIPS16_SHORT_JUMP_TABLES"
+  "TARGET_MIPS16_REL_JUMP_TABLES"
 {
+  machine_mode mode;
   rtx diff_vec = PATTERN (NEXT_INSN (as_a <rtx_insn *> (operands[1])));
 
   gcc_assert (GET_CODE (diff_vec) == ADDR_DIFF_VEC);
 
-  switch (GET_MODE (diff_vec))
+  mode = GET_MODE (diff_vec);
+
+  if (FORCE_REL_JUMP_MODE == VOIDmode)
     {
-    case E_HImode:
-      output_asm_insn ("sll\t%3,%0,1", operands);
-      output_asm_insn ("<d>la\t%2,%1", operands);
-      output_asm_insn ("<d>addu\t%3,%2,%3", operands);
-      output_asm_insn ("lh\t%3,0(%3)", operands);
-      break;
-
-    case E_SImode:
-      output_asm_insn ("sll\t%3,%0,2", operands);
-      output_asm_insn ("<d>la\t%2,%1", operands);
-      output_asm_insn ("<d>addu\t%3,%2,%3", operands);
-      output_asm_insn ("lw\t%3,0(%3)", operands);
-      break;
-
-    default:
-      gcc_unreachable ();
+      if (mode == E_HImode)
+	output_asm_insn ("sll\t%3,%0,1", operands);
+      else
+	output_asm_insn ("sll\t%3,%0,2", operands);
     }
+
+  output_asm_insn ("<d>la\t%2,%1", operands);
+
+  if (FORCE_REL_JUMP_MODE != VOIDmode)
+    output_asm_insn ("<d>addu\t%3,%2,%3", operands);
+  else
+    output_asm_insn ("<d>addu\t%3,%2,%0", operands);
+
+  if (mode == E_HImode)
+    output_asm_insn ("lh\t%3,0(%3)", operands);
+  else if (mode == E_SImode)
+    output_asm_insn ("lw\t%3,0(%3)", operands);
+  else
+    gcc_unreachable ();
 
   output_asm_insn ("<d>addu\t%2,%2,%3", operands);
 
@@ -7518,9 +7569,103 @@
     return "jr\t%2";
 }
   [(set (attr "insn_count")
-	(if_then_else (match_test "GENERATE_MIPS16E")
-		      (const_string "6")
-		      (const_string "7")))])
+	(if_then_else (match_test "FORCE_REL_JUMP_MODE == VOIDmode")
+		      (if_then_else (match_test "GENERATE_MIPS16E")
+				    (const_string "6")
+				    (const_string "7"))
+		      (if_then_else (match_test "GENERATE_MIPS16E")
+				    (const_string "5")
+				    (const_string "6"))))])
+
+(define_insn "casesi_internal_<mode>"
+  [(set (match_operand:P 0 "register_operand" "=d")
+	(unspec:P [(match_operand:SI 1 "register_operand" "d")
+		   (match_operand:P 2 "register_operand" "d")
+		   (label_ref (match_operand 3))]
+	 UNSPEC_CASESI_DISPATCH))
+   (clobber (match_scratch:P 4 "=d"))]
+  "TARGET_TEXT_PIC"
+{
+  machine_mode mode;
+  rtx diff_vec = PATTERN (NEXT_INSN (as_a <rtx_insn *> (operands[3])));
+
+  gcc_assert (GET_CODE (diff_vec) == ADDR_DIFF_VEC);
+  mode = GET_MODE (diff_vec);
+  gcc_assert (mode == E_HImode || mode == E_SImode);
+
+  if (FORCE_REL_JUMP_MODE == VOIDmode)
+    {
+      if (mode == E_HImode)
+	output_asm_insn ("sll\t%4,%1,1", operands);
+      else
+	output_asm_insn ("sll\t%4,%1,2", operands);
+
+      output_asm_insn ("<d>addu\t%4,%2,%4", operands);
+    }
+  else
+    output_asm_insn ("<d>addu\t%4,%2,%1", operands);
+
+  if (mode == E_HImode)
+    return "lh\t%0,0(%4)";
+  else
+    return "lw\t%0,0(%4)";
+}
+  [(set (attr "insn_count")
+	(if_then_else (match_test "FORCE_REL_JUMP_MODE == VOIDmode")
+		      (const_string "2")
+		      (const_string "3")))])
+
+(define_insn "get_pcrel_near_<mode>"
+  [(set (reg:P RETURN_ADDR_REGNUM) (plus (pc) (const_int 8)))
+   (set (match_operand:P 0 "register_operand" "=d")
+	(match_operand 1 "symbolic_operand"))]
+  "TARGET_TEXT_PIC"
+{
+  output_asm_insn ("nal", operands);
+  return "<d>addiu\t%0,$31,%1-1f\n1:";
+}
+  [(set_attr "move_type" "move")
+   (set_attr "compression" "none")
+   (set_attr "mode" "<MODE>")
+   (set_attr "insn_count" "2")])
+
+(define_insn "get_pcrel_far_si_<mode>"
+  [(set (reg:P RETURN_ADDR_REGNUM) (plus (pc) (const_int 8)))
+   (set (match_operand:P 0 "register_operand" "=d")
+	(match_operand 1 "symbolic_operand"))
+   (unspec [(match_dup 1)] UNSPEC_GET_PCREL_FAR_SI)]
+  "TARGET_TEXT_PIC"
+{
+  output_asm_insn ("nal", operands);
+  output_asm_insn ("lui\t%0,%%hi(%1-1f)\n1:", operands);
+  output_asm_insn ("<d>addiu\t%0,%0,%%lo(%1-1b)", operands);
+  return "<d>addu\t%0,$31,%0";
+}
+  [(set_attr "move_type" "move")
+   (set_attr "compression" "none")
+   (set_attr "mode" "<MODE>")
+   (set_attr "insn_count" "4")])
+
+(define_insn "get_pcrel_far_di"
+  [(set (reg:DI RETURN_ADDR_REGNUM) (plus (pc) (const_int 8)))
+   (set (match_operand:DI 0 "register_operand" "=d")
+	(match_operand 1 "symbolic_operand"))
+   (unspec [(match_dup 1)] UNSPEC_GET_PCREL_FAR_DI)]
+  "TARGET_TEXT_PIC"
+{
+  output_asm_insn ("nal", operands);
+  output_asm_insn ("lui\t%0,%%highest(%1-1f)\n1:", operands);
+  output_asm_insn ("daddiu\t%0,%0,%%higher(%1-1b)", operands);
+  output_asm_insn ("dsll\t%0,%0,16", operands);
+  output_asm_insn ("daddiu\t%0,%0,%%hi(%1-1b)", operands);
+  output_asm_insn ("dsll\t%0,%0,16", operands);
+  output_asm_insn ("daddiu\t%0,%0,%%lo(%1-1b)", operands);
+  return "daddu\t%0,$31,%0";
+}
+  [(set_attr "move_type" "move")
+   (set_attr "compression" "none")
+   (set_attr "mode" "DI")
+   (set_attr "insn_count" "8")])
 
 ;; For TARGET_USE_GOT, we save the gp in the jmp_buf as well.
 ;; While it is possible to either pull it off the stack (in the

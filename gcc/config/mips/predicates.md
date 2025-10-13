@@ -370,6 +370,11 @@
 	 jal macro.  */
       return !TARGET_EXPLICIT_RELOCS;
 
+    case SYMBOL_PC_RELATIVE:
+      if (TARGET_TEXT_PIC)
+        return !(GET_CODE (op) == SYMBOL_REF && SYMBOL_REF_LONG_CALL_P (op));
+    /* Fall through */
+
     default:
       return false;
     }

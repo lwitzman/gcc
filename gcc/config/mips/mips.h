@@ -165,6 +165,9 @@ struct mips_cpu_info {
 #define TARGET_ABICALLS_PIC2 \
   (TARGET_ABICALLS && !TARGET_ABICALLS_PIC0)
 
+/* True if we are using basic PC-relative PIC addressing with NAL.  */
+#define TARGET_TEXT_PIC (flag_pic && !TARGET_ABICALLS)
+
 /* True if the call patterns should be split into a jalr followed by
    an instruction to restore $gp.  It is only safe to split the load
    from the call when every use of $gp is explicit.
@@ -2697,19 +2700,26 @@ typedef struct mips_args {
    offsets.  This is only possible when general text loads are allowed,
    since the table access itself will be an "lh" instruction.  If the
    PC-relative offsets grow too large, 32-bit offsets are used instead.  */
-#define TARGET_MIPS16_SHORT_JUMP_TABLES TARGET_MIPS16_TEXT_LOADS
+#define TARGET_MIPS16_REL_JUMP_TABLES TARGET_MIPS16_TEXT_LOADS
 
-#define JUMP_TABLES_IN_TEXT_SECTION TARGET_MIPS16_SHORT_JUMP_TABLES
+#define TARGET_REL_JUMP_TABLES \
+  (TARGET_MIPS16_REL_JUMP_TABLES || TARGET_TEXT_PIC)
 
-#define CASE_VECTOR_MODE (TARGET_MIPS16_SHORT_JUMP_TABLES ? SImode : ptr_mode)
+#define JUMP_TABLES_IN_TEXT_SECTION TARGET_REL_JUMP_TABLES
+
+#define CASE_VECTOR_MODE (TARGET_REL_JUMP_TABLES ? SImode : ptr_mode)
 
 /* Only use short offsets if their range will not overflow.  */
-#define CASE_VECTOR_SHORTEN_MODE(MIN, MAX, BODY) \
-  (!TARGET_MIPS16_SHORT_JUMP_TABLES ? ptr_mode \
-   : ((MIN) >= -32768 && (MAX) < 32768) ? HImode \
-   : SImode)
+#define CASE_VECTOR_SHORTEN_MODE(MIN, MAX, BODY)			\
+  (!TARGET_REL_JUMP_TABLES ? ptr_mode					\
+   : (!TARGET_FORCE_LONG_JUMP_TABLES					\
+       && ((MIN) >= -32768 && (MAX) < 32768))				\
+     ? HImode : SImode)
 
-#define CASE_VECTOR_PC_RELATIVE TARGET_MIPS16_SHORT_JUMP_TABLES
+#define FORCE_REL_JUMP_MODE						\
+  (TARGET_FORCE_LONG_JUMP_TABLES ? SImode : VOIDmode)
+
+#define CASE_VECTOR_PC_RELATIVE TARGET_REL_JUMP_TABLES
 
 /* Define this as 1 if `char' should by default be signed; else as 0.  */
 #ifndef DEFAULT_SIGNED_CHAR
@@ -3019,14 +3029,21 @@ while (0)
 
 #define ASM_OUTPUT_ADDR_DIFF_ELT(STREAM, BODY, VALUE, REL)		\
 do {									\
-  if (TARGET_MIPS16_SHORT_JUMP_TABLES)					\
+  if (TARGET_REL_JUMP_TABLES)						\
     {									\
-      if (GET_MODE (BODY) == HImode)					\
-	fprintf (STREAM, "\t.half\t%sL%d-%sL%d\n",			\
+      if (JUMP_TABLES_IN_TEXT_SECTION)					\
+	fprintf (STREAM, "\t%s\t%sL%d-%sL%d\n",				\
+		 GET_MODE (BODY) == HImode ? ".hword" : ".word",	\
 		 LOCAL_LABEL_PREFIX, VALUE, LOCAL_LABEL_PREFIX, REL);	\
       else								\
-	fprintf (STREAM, "\t.word\t%sL%d-%sL%d\n",			\
-		 LOCAL_LABEL_PREFIX, VALUE, LOCAL_LABEL_PREFIX, REL);	\
+	{								\
+	  rtx fnsym = XEXP (DECL_RTL (current_function_decl), 0);	\
+	  fprintf (STREAM, "\t%s\t%sL%d-",				\
+		   GET_MODE (BODY) == HImode ? ".hword" : ".word",	\
+		   LOCAL_LABEL_PREFIX, VALUE);				\
+	  assemble_name (STREAM, XSTR (fnsym, 0));			\
+	  fprintf (STREAM, "\n");					\
+	}								\
     }									\
   else if (TARGET_GPWORD)						\
     fprintf (STREAM, "\t%s\t%sL%d\n",					\
@@ -3319,6 +3336,9 @@ struct GTY(())  mips_frame_info {
   bool gpr_libcall_p;
   bool fpr_libcall_p;
   bool gpr_includes_fp_p;
+
+  /* GPR to save $ra in when a leaf function clobbers it.  */
+  unsigned char ra_save;
 
   /* The number of GPRs, FPRs, doubleword accumulators and COP0
      registers saved.  */

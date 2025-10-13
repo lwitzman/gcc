@@ -36,9 +36,6 @@ along with GCC; see the file COPYING3.  If not see
 	"%{!mabi=64:%{!mabi=u64:%{!mlong*:-mlong32}}}",			\
 	"%{!mabi=64:%{!mabi=u64:%{!mno-sym32:%{!msym32:-msym32}}}}",	\
 	"%{mabi=u64:%{mlong64:%{!mno-sym32:%{!msym32:-mno-sym32}}}}",	\
-
-	/* Make -mabicalls default for position-independent code.  */	\
-	"%{" FPIE_OR_FPIC_SPEC ":%{!mabi=eabi:-mabicalls}}",			\
 									\
 	/* Remove -mgp32 if it is redundant.  */			\
 	"%{mabi=32:%<mgp32}",						\

@@ -2385,7 +2385,7 @@ mips_classify_symbol (const_rtx x, enum mips_symbol_context context)
 	 text section.  LABEL_REFs are used for jump tables as well as
 	 text labels, so we must check whether jump tables live in the
 	 text section.  */
-      if (TARGET_MIPS16_SHORT_JUMP_TABLES
+      if (TARGET_REL_JUMP_TABLES
 	  && !LABEL_REF_NONLOCAL_P (x))
 	return SYMBOL_PC_RELATIVE;
 
@@ -2410,12 +2410,21 @@ mips_classify_symbol (const_rtx x, enum mips_symbol_context context)
 
       if (mips_rtx_constant_in_small_data_p (get_pool_mode (x)))
 	return SYMBOL_GP_RELATIVE;
+
+      return SYMBOL_ABSOLUTE;
     }
 
   /* Do not use small-data accesses for weak symbols; they may end up
      being zero.  */
-  if (TARGET_GPOPT && SYMBOL_REF_SMALL_P (x) && !SYMBOL_REF_WEAK (x))
-    return SYMBOL_GP_RELATIVE;
+  if (SYMBOL_REF_SMALL_P (x) && !SYMBOL_REF_WEAK (x))
+    {
+      if (TARGET_GPOPT)
+	return SYMBOL_GP_RELATIVE;
+      return SYMBOL_ABSOLUTE;
+    }
+
+    if (TARGET_TEXT_PIC && SYMBOL_REF_FUNCTION_P (x))
+      return SYMBOL_PC_RELATIVE;
 
   /* Don't use GOT accesses for locally-binding symbols when -mno-shared
      is in effect.  */
@@ -2528,6 +2537,8 @@ mips_symbolic_constant_p (rtx x, enum mips_symbol_context context,
 	 but the original symbol-based access was known to be valid.  */
       if (GET_CODE (x) == LABEL_REF)
 	return true;
+      if(TARGET_TEXT_PIC)
+	return true;
 
       /* Fall through.  */
 
@@ -2572,7 +2583,7 @@ mips_symbolic_constant_p (rtx x, enum mips_symbol_context context,
    extended ones.  */
 
 static int
-mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode)
+mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode, rtx addr)
 {
   if (mips_use_pcrel_pool_p[(int) type])
     {
@@ -2610,6 +2621,17 @@ mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode)
       return 1;
 
     case SYMBOL_PC_RELATIVE:
+      if (TARGET_TEXT_PIC)
+	{
+	  if (addr && GET_CODE (addr) == SYMBOL_REF
+	      && SYMBOL_REF_LONG_CALL_P (addr))
+	    {
+	      if (ABI_HAS_64BIT_SYMBOLS)
+		return 8;
+	      return 4;
+	    }
+	  return 2;
+	}
       /* PC-relative constants can be only be used with ADDIUPC,
 	 DADDIUPC, LWPC and LDPC.  */
       if (mode == MAX_MACHINE_MODE
@@ -2686,14 +2708,14 @@ mips_symbol_insns_1 (enum mips_symbol_type type, machine_mode mode)
    In both cases, instruction counts are based off BASE_INSN_LENGTH.  */
 
 static int
-mips_symbol_insns (enum mips_symbol_type type, machine_mode mode)
+mips_symbol_insns (enum mips_symbol_type type, machine_mode mode, rtx addr)
 {
   /* MSA LD.* and ST.* cannot support loading symbols via an immediate
      operand.  */
   if (mode != MAX_MACHINE_MODE && MSA_SUPPORTED_MODE_P (mode))
     return 0;
 
-  return mips_symbol_insns_1 (type, mode) * (TARGET_MIPS16 ? 2 : 1);
+  return mips_symbol_insns_1 (type, mode, addr) * (TARGET_MIPS16 ? 2 : 1);
 }
 
 /* Implement TARGET_CANNOT_FORCE_CONST_MEM.  */
@@ -2730,7 +2752,8 @@ mips_cannot_force_const_mem (machine_mode mode, rtx x)
 	return false;
 
       /* The same optimization as for CONST_INT.  */
-      if (SMALL_INT (offset) && mips_symbol_insns (type, MAX_MACHINE_MODE) > 0)
+      if (SMALL_INT (offset)
+	  && mips_symbol_insns (type, MAX_MACHINE_MODE, NULL_RTX) > 0)
 	return true;
 
       /* If MIPS16 constant pools live in the text section, they should
@@ -2833,7 +2856,7 @@ mips_valid_lo_sum_p (enum mips_symbol_type symbol_type, machine_mode mode)
 {
   /* Check that symbols of type SYMBOL_TYPE can be used to access values
      of mode MODE.  */
-  if (mips_symbol_insns (symbol_type, mode) == 0)
+  if (mips_symbol_insns (symbol_type, mode, NULL_RTX) == 0)
     return false;
 
   /* Check that there is a known low-part relocation.  */
@@ -2909,7 +2932,7 @@ mips_classify_address (struct mips_address_info *info, rtx x,
       info->type = ADDRESS_SYMBOLIC;
       return (mips_symbolic_constant_p (x, SYMBOL_CONTEXT_MEM,
 					&info->symbol_type)
-	      && mips_symbol_insns (info->symbol_type, mode) > 0
+	      && mips_symbol_insns (info->symbol_type, mode, NULL_RTX) > 0
 	      && !mips_split_p[info->symbol_type]);
 
     default:
@@ -3059,7 +3082,9 @@ mips_address_insns (rtx x, machine_mode mode, bool might_split_p)
 	return msa_p ? 0 : factor;
 
       case ADDRESS_SYMBOLIC:
-	return msa_p ? 0 : factor * mips_symbol_insns (addr.symbol_type, mode);
+	return msa_p
+	       ? 0
+	       : factor * mips_symbol_insns (addr.symbol_type, mode, x);
       }
   return 0;
 }
@@ -3233,7 +3258,7 @@ mips_const_insns (rtx x)
 
       /* See if we can refer to X directly.  */
       if (mips_symbolic_constant_p (x, SYMBOL_CONTEXT_LEA, &symbol_type))
-	return mips_symbol_insns (symbol_type, MAX_MACHINE_MODE);
+	return mips_symbol_insns (symbol_type, MAX_MACHINE_MODE, x);
 
       /* Otherwise try splitting the constant into a base and offset.
 	 If the offset is a 16-bit value, we can load the base address
@@ -3260,7 +3285,7 @@ mips_const_insns (rtx x)
     case SYMBOL_REF:
     case LABEL_REF:
       return mips_symbol_insns (mips_classify_symbol (x, SYMBOL_CONTEXT_LEA),
-				MAX_MACHINE_MODE);
+				MAX_MACHINE_MODE, x);
 
     default:
       return 0;
@@ -3665,6 +3690,23 @@ mips_got_load (rtx temp, rtx addr, enum mips_symbol_type type)
     return PMODE_INSN (gen_unspec_got, (high, lo_sum_symbol));
 }
 
+static void
+mips_split_pcrel_symbol (rtx temp, rtx addr)
+{
+  rtx_insn *insn;
+
+  if (GET_CODE (addr) == SYMBOL_REF && SYMBOL_REF_LONG_CALL_P (addr))
+    {
+      if (ABI_HAS_64BIT_SYMBOLS)
+	insn = emit_insn (gen_get_pcrel_far_di (temp, addr));
+      else
+	insn = emit_insn (PMODE_INSN (gen_get_pcrel_far_si, (temp, addr)));
+    }
+  else
+    insn = emit_insn (PMODE_INSN (gen_get_pcrel_near, (temp, addr)));
+  add_reg_note (insn, REG_EQUIV, addr);
+}
+
 /* If MODE is MAX_MACHINE_MODE, ADDR appears as a move operand, otherwise
    it appears in a MEM of that mode.  Return true if ADDR is a legitimate
    constant in that context and can be split into high and low parts.
@@ -3692,7 +3734,7 @@ mips_split_symbol (rtx temp, rtx addr, machine_mode mode, rtx *low_out)
     {
       addr = XEXP (addr, 0);
       if (mips_symbolic_constant_p (addr, context, &symbol_type)
-	  && mips_symbol_insns (symbol_type, mode) > 0
+	  && mips_symbol_insns (symbol_type, mode, NULL_RTX) > 0
 	  && mips_split_hi_p[symbol_type])
 	{
 	  if (low_out)
@@ -3712,7 +3754,7 @@ mips_split_symbol (rtx temp, rtx addr, machine_mode mode, rtx *low_out)
   else
     {
       if (mips_symbolic_constant_p (addr, context, &symbol_type)
-	  && mips_symbol_insns (symbol_type, mode) > 0
+	  && mips_symbol_insns (symbol_type, mode, NULL_RTX) > 0
 	  && mips_split_p[symbol_type])
 	{
 	  if (low_out)
@@ -3727,6 +3769,15 @@ mips_split_symbol (rtx temp, rtx addr, machine_mode mode, rtx *low_out)
 		high = mips_pic_base_register (temp);
 		*low_out = gen_rtx_LO_SUM (Pmode, high, addr);
 		break;
+
+	      case SYMBOL_PC_RELATIVE:
+		if (TARGET_TEXT_PIC)
+		  {
+		    mips_split_pcrel_symbol (temp, addr);
+		    *low_out = temp;
+		    break;
+		  }
+		/* Fall through */
 
 	      default:
 		high = gen_rtx_HIGH (Pmode, copy_rtx (addr));
@@ -9605,6 +9656,9 @@ mips_init_relocs (void)
 	}
     }
 
+  if (TARGET_TEXT_PIC)
+    mips_split_p[SYMBOL_PC_RELATIVE] = true;
+
   if (!MIPS16_GP_LOADS && TARGET_MIPS16)
     {
       /* The high part is provided by a pseudo copy of $gp.  */
@@ -10804,7 +10858,11 @@ mips_set_text_contents_type (FILE *file ATTRIBUTE_UNUSED,
   assemble_name (file, sname);
   fputs (":\n", file);
   if (function_p)
-    fputs ("\t.insn\n", file);
+    {
+      if (!TARGET_MIPS16)
+	ASM_OUTPUT_ALIGN (file, 2);
+      fputs ("\t.insn\n", file);
+    }
 #endif
 }
 
@@ -12087,16 +12145,28 @@ mips_compute_frame_info (void)
 
   if (!cfun->machine->is_naked)
     {
-      int min = 0;
+      int min = 0, ra_save = 0;
 
       /* Find out which GPRs we need to save.  */
       for (regno = GP_REG_FIRST + 1; regno <= GP_REG_LAST; regno++)
 	{
+	  if (crtl->is_leaf && !TARGET_MIPS16
+	      && (TARGET_UABI || regno != AT_REGNUM)
+	      && !cfun->machine->interrupt_handler_p
+	      && regno != PIC_FUNCTION_ADDR_REGNUM
+	      && call_used_regs[regno] && !fixed_regs[regno]
+	      && !df_regs_ever_live_p (regno))
+	    ra_save = regno;
 	  if ((!frame->chain_size
 	       || (regno != HARD_FRAME_POINTER_REGNUM
 		   && regno != RETURN_ADDR_REGNUM))
 	      && mips_save_reg_p (regno))
 	    {
+	      if (ra_save && regno == RETURN_ADDR_REGNUM)
+		{
+		  frame->ra_save = ra_save;
+		  continue;
+		}
 	      frame->num_gp++;
 	      frame->mask |= 1 << (regno - GP_REG_FIRST);
 	    }
@@ -13481,7 +13551,8 @@ mips_expand_prologue (void)
      without going out of range.  */
   if (((frame->mask | frame->fmask | frame->acc_mask) != 0)
       || frame->num_cop0_regs > 0
-      || frame->chain_size > 0)
+      || frame->chain_size > 0
+      || frame->ra_save != 0)
     {
       HOST_WIDE_INT step1;
       bool use_handlers_p;
@@ -13640,6 +13711,10 @@ mips_expand_prologue (void)
 	    }
 	  use_handlers_p = mips_uses_save_restore_libcalls_p ();
 	  mips_for_each_saved_acc (size, mips_save_reg);
+	  if (frame->ra_save != 0)
+	    emit_insn (mips_frame_set (gen_rtx_REG (Pmode, frame->ra_save),
+				       gen_rtx_REG (Pmode,
+						    RETURN_ADDR_REGNUM)));
 	  mips_for_each_saved_gpr_and_fpr (size, mips_save_reg,
 					   use_handlers_p);
 	  if (use_handlers_p)
@@ -13888,9 +13963,15 @@ mips_expand_epilogue (rtx_call_insn *call)
   int restore_mode = 0;
   bool sibcall_p = call != nullptr;
 
+  frame = &cfun->machine->frame;
+
   if (!sibcall_p && mips_can_use_return_insn ())
     {
-      emit_jump_insn (gen_return ());
+      if (frame->ra_save != 0)
+	emit_jump_insn (
+	  gen_return_internal (gen_rtx_REG (Pmode, frame->ra_save)));
+      else
+	emit_jump_insn (gen_return ());
       return;
     }
 
@@ -13904,7 +13985,6 @@ mips_expand_epilogue (rtx_call_insn *call)
      should deallocate afterwards.
 
      Start off by assuming that no registers need to be restored.  */
-  frame = &cfun->machine->frame;
   step1 = frame->total_size;
   step2 = 0;
 
@@ -13958,7 +14038,7 @@ mips_expand_epilogue (rtx_call_insn *call)
   if (cfun->machine->is_naked)
     {
       if (!sibcall_p)
-        emit_jump_insn (gen_return ());
+	emit_jump_insn (gen_return ());
       return;
     }
 
@@ -14001,6 +14081,9 @@ mips_expand_epilogue (rtx_call_insn *call)
       mips_for_each_saved_acc (size, mips_restore_reg);
       if (restore_mode == 2)
 	{
+	  if (sibcall_p && frame->ra_save != 0)
+	    emit_insn (mips_frame_set (gen_rtx_REG (Pmode, RETURN_ADDR_REGNUM),
+				       gen_rtx_REG (Pmode, frame->ra_save)));
 	  mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, true);
 	  mips_epilogue_set_cfa (stack_pointer_rtx, 0);
 	  mips_emit_restore_libcall (size, call, true);
@@ -14008,10 +14091,18 @@ mips_expand_epilogue (rtx_call_insn *call)
       else if (restore_mode == 1)
 	{
 	  mips_emit_restore_libcall (size, call, false);
+	  if (sibcall_p && frame->ra_save != 0)
+	    emit_insn (mips_frame_set (gen_rtx_REG (Pmode, RETURN_ADDR_REGNUM),
+				       gen_rtx_REG (Pmode, frame->ra_save)));
 	  mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, true);
 	}
       else
-	mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, false);
+	{
+	  if (sibcall_p && frame->ra_save != 0)
+	    emit_insn (mips_frame_set (gen_rtx_REG (Pmode, RETURN_ADDR_REGNUM),
+				       gen_rtx_REG (Pmode, frame->ra_save)));
+	  mips_for_each_saved_gpr_and_fpr (size, mips_restore_reg, false);
+	}
 
       if (cfun->machine->interrupt_handler_p)
 	{
@@ -14125,7 +14216,9 @@ mips_expand_epilogue (rtx_call_insn *call)
 	    pat = gen_jraddiusp (GEN_INT (step2));
 	  else
 	    {
-	      rtx reg = gen_rtx_REG (Pmode, RETURN_ADDR_REGNUM);
+	      rtx reg = gen_rtx_REG (Pmode, frame->ra_save
+					    ? frame->ra_save
+					    : RETURN_ADDR_REGNUM);
 	      pat = gen_simple_return_internal (reg);
 	    }
 	  emit_jump_insn (pat);
@@ -15253,7 +15346,8 @@ mips_output_jump (rtx *operands, int target_opno, int size_opno, bool link_p)
   const char *compact = "";
   const char *nop = "%/";
   const char *short_delay = link_p ? "%!" : "";
-  const char *insn_name = TARGET_CB_NEVER || reg_p ? "j" : "b";
+  const char *insn_name
+    = (TARGET_CB_NEVER && !TARGET_TEXT_PIC) || reg_p ? "j" : "b";
 
   /* Compact branches can only be described when the ISA has support for them
      as both the compact formatter '%:' and the delay slot NOP formatter '%/'
@@ -21364,14 +21458,22 @@ mips_set_compression_mode (unsigned int compression_mode)
 
       if (!TARGET_EXPLICIT_RELOCS)
 	sorry ("MIPS16 requires %<-mexplicit-relocs%>");
+
+      if (TARGET_TEXT_PIC)
+	sorry ("MIPS16 %<-fpic -mno-abicalls%> code");
     }
   else
     {
       /* Switch to microMIPS or the standard encoding.  */
 
       if (TARGET_MICROMIPS)
-	/* Avoid branch likely.  */
-	target_flags &= ~MASK_BRANCHLIKELY;
+	{
+	  /* Avoid branch likely.  */
+	  target_flags &= ~MASK_BRANCHLIKELY;
+
+	  if (TARGET_TEXT_PIC)
+	    sorry ("microMIPS %<-fpic -mno-abicalls%> code");
+	}
 
       /* Provide default values for align_* for 64-bit targets.  */
       if (TARGET_64BIT)
@@ -21905,14 +22007,20 @@ mips_option_override (void)
 	error ("%<-mabi=u32%> needs %<-mexplicit-relocs%>");
     }
 
-  /* PIC requires -mabicalls.  */
-  if (flag_pic)
+  if (TARGET_TEXT_PIC)
     {
-      if (mips_abi == ABI_EABI)
-	error ("cannot generate position-independent code for %qs",
-	       "-mabi=eabi");
-      else if (!TARGET_ABICALLS)
-	error ("position-independent code requires %qs", "-mabicalls");
+      if (mips_abi == ABI_N32)
+	error ("unsupported combination: %s", "-fpic -mno-abicalls -mabi=n32");
+      else if (mips_abi == ABI_64)
+	error ("unsupported combination: %s", "-fpic -mno-abicalls -mabi=64");
+      if ((mips_base_compression_flags & MASK_MIPS16) != 0)
+	error ("unsupported combination: %s", "-fpic -mno-abicalls -mips16");
+      if ((mips_base_compression_flags & MASK_MICROMIPS) != 0)
+	error ("unsupported combination: %s", "-fpic -mno-abicalls -mmicromips");
+      if (!TARGET_EXPLICIT_RELOCS)
+	error ("%<-fpic%> %<-mno-abicalls%> needs %<-mexplicit-relocs%>");
+      if (!TARGET_SHARED)
+	error ("%<-fpic%> %<-mno-abicalls%> needs %<-mshared%>");
     }
 
   if (TARGET_ABICALLS_PIC2)
