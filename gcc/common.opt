@@ -4031,4 +4031,8 @@ fext-dce
 Common Var(flag_ext_dce, 1) Optimization Init(0)
 Perform dead code elimination on zero and sign extensions with special dataflow analysis.
 
+fnoreturn-sibling-calls
+Common Var(flag_noreturn_sibling_calls) Optimization
+Use sibling calls for noreturn functions if possible.
+
 ; This comment is to ensure we retain the blank line above.

@@ -430,7 +430,7 @@ emit_call_1 (rtx funexp, tree fntree ATTRIBUTE_UNUSED, tree fndecl ATTRIBUTE_UNU
 
   if (ecf_flags & ECF_SIBCALL)
     {
-      if (valreg)
+      if (valreg && !(ecf_flags & ECF_NORETURN))
 	pat = targetm.gen_sibcall_value (valreg, funmem,
 					 rounded_stack_size_rtx,
 					 next_arg_reg, NULL_RTX);
@@ -2583,14 +2583,17 @@ can_implement_as_sibling_call_p (tree exp,
       maybe_complain_about_tail_call (exp, _("callee returns twice"));
       return false;
     }
-  if ((flags & ECF_NORETURN) && !CALL_EXPR_MUST_TAIL_CALL (exp))
+
+  if ((flags & ECF_NORETURN) && !CALL_EXPR_MUST_TAIL_CALL (exp)
+      && !flag_noreturn_sibling_calls)
     {
       maybe_complain_about_tail_call (exp, _("callee does not return"));
       return false;
     }
 
   if (TYPE_VOLATILE (TREE_TYPE (TREE_TYPE (addr)))
-      && !CALL_EXPR_MUST_TAIL_CALL (exp))
+      && !CALL_EXPR_MUST_TAIL_CALL (exp)
+      && (!flag_noreturn_sibling_calls || !(flags & ECF_NORETURN)))
     {
       maybe_complain_about_tail_call (exp, _("volatile function type"));
       return false;
@@ -3067,6 +3070,9 @@ expand_call (tree exp, rtx target, int ignore)
 	      && maybe_ne (args_size.constant, 0))))
     structure_value_addr = copy_to_reg (structure_value_addr);
 
+  if (flag_noreturn_sibling_calls && (flags & ECF_NORETURN))
+    try_tail_call = 1;
+
   /* Tail calls can make things harder to debug, and we've traditionally
      pushed these optimizations into -O2.  Don't try if we're already
      expanding a call, as that means we're an argument.  Don't try if
@@ -3077,6 +3083,7 @@ expand_call (tree exp, rtx target, int ignore)
       try_tail_call = 0;
     }
   if (!flag_optimize_sibling_calls
+	&& (!(flags & ECF_NORETURN) || !flag_noreturn_sibling_calls)
 	&& !CALL_FROM_THUNK_P (exp)
 	&& !CALL_EXPR_MUST_TAIL_CALL (exp))
     try_tail_call = 0;

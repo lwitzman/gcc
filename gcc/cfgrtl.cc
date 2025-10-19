@@ -3355,7 +3355,9 @@ purge_dead_edges (basic_block bb)
 
       return purged;
     }
-  else if (CALL_P (insn) && SIBLING_CALL_P (insn))
+  else if (CALL_P (insn) && SIBLING_CALL_P (insn)
+    && (!flag_noreturn_sibling_calls ||
+	!find_reg_note (insn, REG_NORETURN, NULL)))
     {
       /* First, there should not be any EH or ABCALL edges resulting
 	 from non-local gotos and the like.  If there were, we shouldn't
