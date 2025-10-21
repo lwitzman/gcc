@@ -68,6 +68,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "flags.h"
 #include "opts.h"
 #include "dojump.h"
+#include "function-abi.h"
+#include "gimple-iterator.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -612,6 +614,7 @@ const enum reg_class mips_regno_to_class[FIRST_PSEUDO_REGISTER] = {
   ALL_REGS,	ALL_REGS,	ALL_REGS,	ALL_REGS
 };
 
+static tree mips_handle_uabi_attr (tree *, tree, tree, int, bool *);
 static tree mips_handle_code_readable_attr (tree *, tree, tree, int, bool *);
 static tree mips_handle_naked_attribute (tree *, tree, tree, int, bool *);
 static tree mips_handle_interrupt_attr (tree *, tree, tree, int, bool *);
@@ -626,6 +629,10 @@ TARGET_GNU_ATTRIBUTES (mips_attribute_table, {
   { "short_call",  0, 0, false, true,  true,  false, NULL, NULL },
   { "far",     	   0, 0, false, true,  true,  false, NULL, NULL },
   { "near",        0, 0, false, true,  true,  false, NULL, NULL },
+  { "u64t",	   0, 0, true, false,  false,  false, mips_handle_uabi_attr,
+    NULL },
+  { "u64x",	   0, 0, true, false,  false,  false, mips_handle_uabi_attr,
+    NULL },
   /* We would really like to treat "mips16" and "nomips16" as type
      attributes, but GCC doesn't provide the hooks we need to support
      the right conversion rules.  As declaration attributes, they affect
@@ -1264,6 +1271,18 @@ mips_far_type_p (const_tree type)
 }
 
 static bool
+mips_u64t_type_p (const_tree type)
+{
+  return mips_lookup_function_attribute1 (type, "u64t");
+}
+
+static bool
+mips_u64x_type_p (const_tree type)
+{
+  return mips_lookup_function_attribute1 (type, "u64x");
+}
+
+static bool
 mips_naked_type_p (const_tree type)
 {
   return mips_lookup_function_attribute1 (type, "naked");
@@ -1357,6 +1376,32 @@ mips_use_debug_exception_return_p (tree type)
 			   TYPE_ATTRIBUTES (type)) != NULL;
 }
 
+/* Handle "u64t" and "u64x" attributes.  */
+
+static tree
+mips_handle_uabi_attr (tree *node ATTRIBUTE_UNUSED, tree name,
+		       tree args ATTRIBUTE_UNUSED,
+		       int flags ATTRIBUTE_UNUSED, bool *no_add_attrs)
+{
+  if (mips_abi != ABI_U64)
+    error ("%qE attribute requires %qs", name, "-mabi=u64");
+  else if (TARGET_LONG64)
+    error ("%qE attribute requires %qs", name, "-mlong32");
+
+  if (TREE_CODE (*node) != FUNCTION_DECL)
+    {
+      warning (OPT_Wattributes, "%qE attribute only applies to functions",
+	       name);
+      *no_add_attrs = true;
+    }
+  else if ((is_attribute_p ("u64t", name)
+	    && lookup_attribute ("u64x", DECL_ATTRIBUTES (*node)))
+	   || (is_attribute_p ("u64x", name)
+	    && lookup_attribute ("u64t", DECL_ATTRIBUTES (*node))))
+    error ("u64t and u64x attributes are not compatible");
+
+  return NULL_TREE;
+}
 
 /* Verify the arguments to a code_readable attribute.  */
 
@@ -1540,6 +1585,13 @@ mips_comp_type_attributes (const_tree type1, const_tree type2)
     return 0;
   if (mips_near_type_p (type1) && mips_far_type_p (type2))
     return 0;
+  if (mips_abi == ABI_U64 && !TARGET_LONG64)
+    {
+	if (mips_u64t_type_p (type1) != mips_u64t_type_p (type2))
+	  return 0;
+	if (mips_u64x_type_p (type1) != mips_u64x_type_p (type2))
+	  return 0;
+    }
   return 1;
 }
 
@@ -1615,6 +1667,21 @@ mips_merge_decl_attributes (tree olddecl, tree newdecl)
   if (diff)
     error ("%qE redeclared with conflicting %qs attributes",
 	   DECL_NAME (newdecl), mips_get_compress_off_name (diff));
+
+  if (mips_abi == ABI_U64 && !TARGET_LONG64)
+    {
+      diff = (mips_u64t_type_p (DECL_ATTRIBUTES (olddecl))
+	      ^ mips_u64t_type_p (DECL_ATTRIBUTES (newdecl)));
+      if (diff)
+	error ("%qE redeclared with conflicting %qs attributes",
+	       DECL_NAME (newdecl), "u64t");
+
+      diff = (mips_u64x_type_p (DECL_ATTRIBUTES (olddecl))
+	      ^ mips_u64x_type_p (DECL_ATTRIBUTES (newdecl)));
+      if (diff)
+	error ("%qE redeclared with conflicting %qs attributes",
+	       DECL_NAME (newdecl), "u64x");
+  }
 
   return merge_attributes (DECL_ATTRIBUTES (olddecl),
 			   DECL_ATTRIBUTES (newdecl));
@@ -2290,6 +2357,9 @@ mips_uses_save_restore_libcalls_p ()
   const struct mips_frame_info *frame;
 
   if (!TARGET_SAVE_RESTORE || TARGET_MIPS16 || TARGET_MICROMIPS)
+    return false;
+
+  if (cfun->machine->u64_ext == 'x')
     return false;
 
   if (cfun->machine->is_naked)
@@ -3743,7 +3813,7 @@ mips_expand_thread_pointer (rtx tp)
 {
   rtx fn;
 
-  if (mips_abi == ABI_U64)
+  if (TARGET_UABI)
     mips_emit_move (tp, gen_rtx_REG (Pmode, K1_REG_NUM));
   else if (TARGET_MIPS16)
     {
@@ -3760,7 +3830,7 @@ mips_expand_thread_pointer (rtx tp)
 static rtx
 mips_get_tp (void)
 {
-  if (mips_abi == ABI_U64)
+  if (TARGET_UABI)
     return gen_rtx_REG (Pmode, K1_REG_NUM);
 
   return mips_expand_thread_pointer (gen_reg_rtx (Pmode));
@@ -6238,11 +6308,16 @@ mips_expand_conditional_trap (rtx comparison)
 /* Initialize *CUM for a call to a function of type FNTYPE.  */
 
 void
-mips_init_cumulative_args (CUMULATIVE_ARGS *cum, tree fntype)
+mips_init_cumulative_args (CUMULATIVE_ARGS *cum, tree fntype, rtx libname)
 {
   memset (cum, 0, sizeof (*cum));
   cum->prototype = (fntype && prototype_p (fntype));
   cum->gp_reg_found = (cum->prototype && stdarg_p (fntype));
+
+  /* Check for disallowed U64 builtin calls after expand.  */
+  if (cfun && cfun->machine->u64_ext != '\0' && libname)
+      error ("u64%c functions can only call u64x functions",
+	     cfun->machine->u64_ext);
 }
 
 /* Fill INFO with information about a single argument.  CUM is the
@@ -6331,6 +6406,7 @@ mips_get_arg_info (struct mips_arg_info *info, const CUMULATIVE_ARGS *cum,
 	}
       break;
 
+    case ABI_U32:
     case ABI_U64:
       {
 	if (!named || !TARGET_HARD_FLOAT)
@@ -6421,13 +6497,13 @@ mips_get_arg_info (struct mips_arg_info *info, const CUMULATIVE_ARGS *cum,
   /* Set REG_OFFSET to the register count we're interested in.
      The EABI allocates the floating-point registers separately,
      but the other ABIs allocate them like integer registers.  */
-  info->reg_offset = ((mips_abi == ABI_EABI || mips_abi == ABI_U64)
+  info->reg_offset = ((mips_abi == ABI_EABI || TARGET_UABI)
 			&& info->fpr_p
 		      ? cum->num_fprs
 		      : cum->num_gprs);
 
   /* Advance to an even register if the argument is doubleword-aligned.  */
-  if (doubleword_aligned_p && (mips_abi != ABI_U64 || !info->fpr_p))
+  if (doubleword_aligned_p && (!TARGET_UABI || !info->fpr_p))
     info->reg_offset += info->reg_offset & 1;
 
   /* Work out the offset of a stack argument.  */
@@ -6435,7 +6511,7 @@ mips_get_arg_info (struct mips_arg_info *info, const CUMULATIVE_ARGS *cum,
   if (doubleword_aligned_p)
     info->stack_offset += info->stack_offset & 1;
 
-  if (mips_abi == ABI_U64 && !named)
+  if (TARGET_UABI && !named)
     {
       info->reg_offset = MAX_ARGS_IN_REGISTERS;
       info->reg_words = 0;
@@ -6484,7 +6560,7 @@ mips_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
   struct mips_arg_info info;
 
-  if (mips_abi == ABI_U64 && !arg.named)
+  if (TARGET_UABI && !arg.named)
     return NULL;
 
   /* We will be called with an end marker after the last argument
@@ -6608,7 +6684,7 @@ mips_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
 	}
     }
 
-  if (mips_abi == ABI_U64 && info.fpr_p
+  if (TARGET_UABI && info.fpr_p
       && arg.type != 0 && TREE_CODE (arg.type) == RECORD_TYPE)
     {
       unsigned int i;
@@ -6648,7 +6724,7 @@ mips_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
   /* Handle the n32/n64 conventions for passing complex floating-point
      arguments in FPR pairs.  The real part goes in the lower register
      and the imaginary part goes in the upper register.  */
-  if ((TARGET_NEWABI || mips_abi == ABI_U64)
+  if ((TARGET_NEWABI || TARGET_UABI)
       && info.fpr_p
       && GET_MODE_CLASS (arg.mode) == MODE_COMPLEX_FLOAT)
     {
@@ -6706,10 +6782,10 @@ mips_function_arg_advance (cumulative_args_t cum_v,
      num_gprs to MAX_ARGS_IN_REGISTERS if a doubleword-aligned
      argument required us to skip the final GPR and pass the whole
      argument on the stack.  */
-  if ((mips_abi != ABI_EABI && mips_abi != ABI_U64) || !info.fpr_p)
+  if ((mips_abi != ABI_EABI && !TARGET_UABI) || !info.fpr_p)
     cum->num_gprs = info.reg_offset + info.reg_words;
   else if (info.reg_words > 0)
-    cum->num_fprs += mips_abi == ABI_U64 ? info.reg_words : MAX_FPRS_PER_FMT;
+    cum->num_fprs += TARGET_UABI ? info.reg_words : MAX_FPRS_PER_FMT;
 
   /* Advance the stack word count.  */
   if (info.stack_words > 0)
@@ -6802,7 +6878,7 @@ mips_function_arg_padding (machine_mode mode, const_tree type)
       return PAD_DOWNWARD;
 
   /* Other types are padded upward for o32, o64, n32 and n64.  */
-  if (mips_abi != ABI_EABI && mips_abi != ABI_U64)
+  if (mips_abi != ABI_EABI && !TARGET_UABI)
     return PAD_UPWARD;
 
   /* Arguments smaller than a stack slot are padded downward.  */
@@ -6860,7 +6936,7 @@ mips_pass_by_reference (cumulative_args_t, const function_arg_info &arg)
 static bool
 mips_callee_copies (cumulative_args_t, const function_arg_info &arg)
 {
-  return (mips_abi == ABI_EABI && arg.named) || mips_abi == ABI_U64;
+  return (mips_abi == ABI_EABI && arg.named) || TARGET_UABI;
 }
 
 /* See whether VALTYPE is a record whose fields should be returned in
@@ -6894,7 +6970,7 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
   tree field;
   int i, n, num, max;
 
-  if (!TARGET_NEWABI && mips_abi != ABI_U64)
+  if (!TARGET_NEWABI && !TARGET_UABI)
     return 0;
 
   if (TREE_CODE (valtype) != RECORD_TYPE)
@@ -6902,7 +6978,7 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
 
   i = 0;
   num = 0;
-  max = mips_abi == ABI_U64 ? 4 >> (MAX_FPRS_PER_FMT-1) : 2;
+  max = TARGET_UABI ? 4 >> (MAX_FPRS_PER_FMT-1) : 2;
   for (field = TYPE_FIELDS (valtype); field != 0; field = DECL_CHAIN (field))
     {
       if (TREE_CODE (field) != FIELD_DECL)
@@ -6924,7 +7000,7 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
 
       if (SCALAR_FLOAT_TYPE_P (TREE_TYPE (field)))
 	n = 1;
-      else if (mips_abi == ABI_U64 && COMPLEX_FLOAT_TYPE_P (TREE_TYPE (field)))
+      else if (TARGET_UABI && COMPLEX_FLOAT_TYPE_P (TREE_TYPE (field)))
 	n = 2;
       else
 	return 0;
@@ -6954,7 +7030,7 @@ mips_fpr_return_fields (const_tree valtype, tree *fields,
 static bool
 mips_return_in_msb (const_tree valtype)
 {
-  if ((!TARGET_NEWABI && mips_abi != ABI_U64)
+  if ((!TARGET_NEWABI && !TARGET_UABI)
       || !TARGET_BIG_ENDIAN || !AGGREGATE_TYPE_P (valtype))
     return false;
 
@@ -7152,7 +7228,7 @@ mips_function_value_1 (const_tree valtype, const_tree fn_decl_or_type,
 	    }
 	}
 
-      if (mips_abi == ABI_U64 && use_fpr)
+      if (TARGET_UABI && use_fpr)
 	return mips_return_fpr_vec (mode, fields, use_fpr);
 
       /* Handle structures whose fields are returned in $f0/$f2.  */
@@ -7251,7 +7327,7 @@ mips_function_value_regno_p (const unsigned int regno)
      return registers are described as 64-bit even though floating-point
      registers are primarily described as 32-bit internally.
      See: mips_get_reg_raw_mode.  */
-  if (((mips_abi == ABI_32 && TARGET_FLOAT32) || mips_abi == ABI_U64)
+  if (((mips_abi == ABI_32 && TARGET_FLOAT32) || TARGET_UABI)
       && FP_RETURN != GP_RETURN
       && (regno == FP_RETURN + 1
 	  || regno == FP_RETURN + 3))
@@ -7275,7 +7351,7 @@ mips_return_in_memory (const_tree type, const_tree fndecl ATTRIBUTE_UNUSED)
     return (VECTOR_FLOAT_TYPE_P (type)
 	    || TYPE_MODE (type) == BLKmode);
 
-  if (mips_abi == ABI_U64
+  if (TARGET_UABI
       && IN_RANGE (mips_fpr_return_fields (type, NULL, NULL, NULL), 1, 4))
     return false;
 
@@ -7292,7 +7368,7 @@ mips_setup_incoming_varargs (cumulative_args_t cum,
   CUMULATIVE_ARGS local_cum;
   int gp_saved, fp_saved;
 
-  if (mips_abi == ABI_U64)
+  if (TARGET_UABI)
     return;
 
   /* The caller has advanced CUM up to, but not beyond, the last named
@@ -8050,7 +8126,7 @@ mips_output_args_xfer (int fp_code, char direction)
   /* This code only works for o32 and o64.  */
   gcc_assert (TARGET_OLDABI);
 
-  mips_init_cumulative_args (&cum, NULL);
+  mips_init_cumulative_args (&cum, NULL, NULL);
 
   for (f = (unsigned int) fp_code; f != 0; f >>= 2)
     {
@@ -8585,7 +8661,7 @@ mips_expand_call (enum mips_call_type type, rtx result, rtx addr,
       pattern = fn (addr, args_size);
     }
   else if (GET_CODE (result) == PARALLEL
-	&& IN_RANGE (XVECLEN (result, 0), 2, mips_abi == ABI_U64 ? 4 : 2))
+	&& IN_RANGE (XVECLEN (result, 0), 2, TARGET_UABI ? 4 : 2))
     {
       /* Handle return values created by mips_return_fpr_pair.  */
       rtx regs[4];
@@ -10752,6 +10828,8 @@ mips_mdebug_abi_name (void)
       return TARGET_64BIT ? "eabi64" : "eabi32";
     case ABI_U64:
       return "abiU64";
+    case ABI_U32:
+      return "abiU32";
     default:
       gcc_unreachable ();
     }
@@ -11897,12 +11975,17 @@ mips_save_reg_p (unsigned int regno)
    They decrease stack_pointer_rtx but leave frame_pointer_rtx and
    hard_frame_pointer_rtx unchanged.  */
 
-#define GPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_WORD)
-#define FPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_FPREG)
-#define HWFPR_STACK_UNITS (mips_abi == ABI_U64 ? 4 : UNITS_PER_HWFPVALUE)
+#define UABI_STACK_UNITS \
+  (cfun->machine->u64_ext == 'x' ? 8 : (LONG_TYPE_SIZE/BITS_PER_UNIT))
+#define GPR_STACK_UNITS \
+  (TARGET_UABI ? UABI_STACK_UNITS : UNITS_PER_WORD)
+#define FPR_STACK_UNITS \
+  (TARGET_UABI ? UABI_STACK_UNITS : UNITS_PER_FPREG)
+#define HWFPR_STACK_UNITS \
+  (TARGET_UABI ? UABI_STACK_UNITS : UNITS_PER_HWFPVALUE)
 
 #define FRAME_CHAIN_SIZE						\
-  ((mips_abi == ABI_U64							\
+  ((TARGET_UABI								\
     && (!flag_omit_frame_pointer					\
 	|| (TARGET_OMIT_LEAF_FRAME_POINTER && !crtl->is_leaf))		\
     && !TARGET_MIPS16 && !TARGET_MICROMIPS)				\
@@ -12028,7 +12111,8 @@ mips_compute_frame_info (void)
             frame->mask |= 1 << (EH_RETURN_DATA_REGNO (i) - GP_REG_FIRST);
           }
 
-      if (TARGET_SAVE_RESTORE && !TARGET_MICROMIPS && !TARGET_MIPS16)
+      if (TARGET_SAVE_RESTORE && cfun->machine->u64_ext != 'x'
+          && !TARGET_MICROMIPS && !TARGET_MIPS16)
         {
 
           /* Threshold is two extra instructions needed for setting the
@@ -12680,7 +12764,7 @@ mips_for_each_saved_gpr_and_fpr (HOST_WIDE_INT sp_offset,
 	/* Record the ra offset for use by mips_function_profiler.  */
 	if (regno == RETURN_ADDR_REGNUM)
 	  cfun->machine->frame.ra_fp_offset = offset + sp_offset;
-	mips_save_restore_reg (mips_abi == ABI_U64 ? SImode : word_mode,
+	mips_save_restore_reg (GPR_STACK_UNITS == 4 ? SImode : word_mode,
 			       regno, offset, fn);
 	offset -= GPR_STACK_UNITS;
       }
@@ -12692,7 +12776,7 @@ mips_for_each_saved_gpr_and_fpr (HOST_WIDE_INT sp_offset,
   /* This loop must iterate over the same space as its companion in
      mips_compute_frame_info.  */
   offset = cfun->machine->frame.fp_sp_offset - sp_offset;
-  fpr_mode = (TARGET_SINGLE_FLOAT || mips_abi == ABI_U64 ? SFmode : DFmode);
+  fpr_mode = (TARGET_SINGLE_FLOAT || FPR_STACK_UNITS == 4 ? SFmode : DFmode);
   for (regno = FP_REG_LAST - MAX_FPRS_PER_FMT + 1;
        regno >= FP_REG_FIRST;
        regno -= MAX_FPRS_PER_FMT)
@@ -12753,7 +12837,7 @@ mips_emit_save_slot_move (rtx dest, rtx src, rtx temp)
       /* We don't yet know whether we'll need this instruction or not.
 	 Postpone the decision by emitting a ghost move.  This move
 	 is specifically not frame-related; only the split version is.  */
-      if (TARGET_64BIT && mips_abi != ABI_U64)
+      if (TARGET_64BIT && GPR_STACK_UNITS == 8)
 	emit_insn (gen_move_gpdi (dest, src));
       else
 	emit_insn (gen_move_gpsi (dest, src));
@@ -14237,13 +14321,155 @@ mips_hard_regno_scratch_ok (unsigned int regno)
   return true;
 }
 
+/* Check for disallowed U64 calls.  */
+
+static unsigned int
+mips_u64_check (void)
+{
+  basic_block bb;
+  gimple_stmt_iterator gsi;
+  struct cgraph_node *node;
+  function *fn;
+
+  FOR_EACH_DEFINED_FUNCTION (node)
+    {
+      fn = node->get_fun ();
+      if (fn == NULL || fn->cfg == NULL)
+	continue;
+
+      FOR_EACH_BB_FN (bb, fn)
+	for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+	  {
+	    tree decl;
+	    gimple *stmt = gsi_stmt (gsi);
+
+	    if (!is_gimple_call (stmt))
+	      continue;
+
+	    decl = gimple_call_fndecl (stmt);
+	    if (!decl || fndecl_built_in_p (decl)
+		|| (gimple_call_flags (stmt) & ECF_NORETURN))
+	      continue;
+
+	    if (fn->machine->u64_ext != '\0' && !mips_u64x_type_p (decl))
+	      {
+		location_t loc = gimple_location_safe (stmt);
+
+		if (decl == current_function_decl)
+		  error_at (loc,
+			    "u64%c functions cannot be called recursively",
+			    fn->machine->u64_ext);
+		else
+		  error_at (loc,
+			    "u64%c functions can only call u64x functions",
+			    fn->machine->u64_ext);
+	      }
+	  }
+    }
+  return 0;
+}
+
+namespace {
+
+const pass_data pass_data_mips_u64_check =
+{
+  GIMPLE_PASS, /* type */
+  "u64", /* name */
+  OPTGROUP_NONE, /* optinfo_flags */
+  TV_CGRAPH, /* tv_id */
+  0, /* properties_required */
+  0, /* properties_provided */
+  0, /* properties_destroyed */
+  0, /* todo_flags_start */
+  0, /* todo_flags_finish */
+};
+
+class pass_mips_u64_check : public gimple_opt_pass
+{
+public:
+  pass_mips_u64_check(gcc::context *ctxt)
+    : gimple_opt_pass(pass_data_mips_u64_check, ctxt)
+  {}
+
+  /* opt_pass methods: */
+  virtual unsigned int execute (function *) { return mips_u64_check (); }
+
+}; // class pass_mips_u64_check
+
+} // anon namespace
+
+gimple_opt_pass *
+make_pass_mips_u64_check (gcc::context *ctxt)
+{
+  return new pass_mips_u64_check (ctxt);
+}
+
+enum mips_cc {
+  MIPS_CC_DEFAULT,
+  MIPS_CC_U64T,
+  MIPS_CC_U64X,
+};
+
+/* Implement TARGET_FNTYPE_ABI.  */
+
+static const predefined_function_abi &
+mips_fntype_abi (const_tree fntype)
+{
+  enum mips_cc cc;
+
+  if (mips_abi != ABI_U64 || TARGET_LONG64)
+    return default_function_abi;
+
+  if (mips_u64x_type_p (fntype))
+    cc = MIPS_CC_U64X;
+  else if (mips_u64t_type_p (fntype))
+    cc = MIPS_CC_U64T;
+  else
+    return default_function_abi;
+
+  if (!function_abis[cc].initialized_p ())
+    {
+      HARD_REG_SET full_reg_clobbers
+	= default_function_abi.full_reg_clobbers ();
+      function_abis[cc].initialize (cc, full_reg_clobbers);
+    }
+
+  return function_abis[cc];
+}
+
+/* Implement TARGET_INSN_CALLEE_ABI.  */
+
+static const predefined_function_abi &
+mips_insn_callee_abi (const rtx_insn *insn)
+{
+  if (mips_abi == ABI_U64 && !TARGET_LONG64)
+    {
+      rtx sym;
+
+      sym = mips_find_call_symbol (insn);
+      if (sym != NULL_RTX)
+	{
+	  const_tree decl = SYMBOL_REF_DECL (sym);
+	  if (decl)
+	    {
+	      if (mips_u64x_type_p (decl))
+		return function_abis[MIPS_CC_U64X];
+	      else if (mips_u64t_type_p (decl))
+		return function_abis[MIPS_CC_U64T];
+	    }
+	}
+    }
+
+  return default_function_abi;
+}
+
 /* Implement TARGET_HARD_REGNO_CALL_PART_CLOBBERED.  Odd-numbered
    single-precision registers are not considered callee-saved for o32
    FPXX as they will be clobbered when run on an FR=1 FPU.  MSA vector
    registers with MODE > 64 bits are part clobbered too.  */
 
 static bool
-mips_hard_regno_call_part_clobbered (unsigned int, unsigned int regno,
+mips_hard_regno_call_part_clobbered (unsigned int abi_id, unsigned int regno,
 				     machine_mode mode)
 {
   if (TARGET_FLOATXX
@@ -14255,7 +14481,8 @@ mips_hard_regno_call_part_clobbered (unsigned int, unsigned int regno,
   if (ISA_HAS_MSA && FP_REG_P (regno) && GET_MODE_SIZE (mode) > 8)
     return true;
 
-  if (mips_abi == ABI_U64 && (GP_REG_P (regno) || FP_REG_P (regno))
+  if (mips_abi == ABI_U64 && !TARGET_LONG64 && abi_id == MIPS_CC_DEFAULT
+      && (GP_REG_P (regno) || FP_REG_P (regno))
       && !call_used_regs[regno] && GET_MODE_SIZE (mode) > 4)
     return true;
 
@@ -21202,6 +21429,13 @@ mips_set_current_function (tree fndecl)
       && !cfun->machine->attributes_checked_p)
     {
       cfun->machine->is_naked = mips_naked_type_p (fndecl);
+      if (mips_abi == ABI_U64 && !TARGET_LONG64)
+	{
+	  if (mips_u64x_type_p (fndecl))
+	    cfun->machine->u64_ext = 'x';
+	  else if (mips_u64t_type_p (fndecl))
+	    cfun->machine->u64_ext = 't';
+	}
       cfun->machine->attributes_checked_p = 1;
     }
 
@@ -21529,8 +21763,8 @@ mips_option_override (void)
 	{
 	  if (mips_abi == ABI_N32)
 	    error ("%qs is incompatible with %qs", "-mabi=n32", "-mlong64");
-	  else if (mips_abi == ABI_U64)
-	    error ("%qs is incompatible with %qs", "-mabi=u64", "-mlong64");
+	  else if (mips_abi == ABI_U32)
+	    error ("%qs is incompatible with %qs", "-mabi=u32", "-mlong64");
 	  else if (mips_abi == ABI_32)
 	    error ("%qs is incompatible with %qs", "-mabi=32", "-mlong64");
 	  else if (mips_abi == ABI_O64 && TARGET_ABICALLS)
@@ -21663,10 +21897,12 @@ mips_option_override (void)
       target_flags &= ~MASK_ABICALLS;
     }
 
-  if (TARGET_SAVE_RESTORE && mips_abi != ABI_U64)
+  if (!TARGET_EXPLICIT_RELOCS)
     {
-      error ("%qs requires %qs", "-msave-restore", "-mabi=u64");
-      target_flags &= ~MASK_SAVE_RESTORE;
+      if (mips_abi == ABI_U64)
+	error ("%<-mabi=u64%> needs %<-mexplicit-relocs%>");
+      else if (mips_abi == ABI_U32)
+	error ("%<-mabi=u32%> needs %<-mexplicit-relocs%>");
     }
 
   /* PIC requires -mabicalls.  */
@@ -21704,7 +21940,7 @@ mips_option_override (void)
 
   /* Use save/restore handlers by default when on u64 ABI and optimizing for
      size.  */
-  if (mips_abi == ABI_U64
+  if (TARGET_UABI
       && optimize_size && (target_flags_explicit & MASK_SAVE_RESTORE) == 0)
     target_flags |= MASK_SAVE_RESTORE;
 
@@ -21971,6 +22207,19 @@ mips_option_override (void)
     };
   register_pass (&insert_pass_mips_machine_reorg2);
 
+  if (mips_abi == ABI_U64 && !TARGET_LONG64)
+    {
+      opt_pass *new_pass = make_pass_mips_u64_check (g);
+      struct register_pass_info insert_pass_mips_u64_check =
+	{
+	  new_pass,			/* pass */
+	  "cfg",			/* reference_pass_name */
+	  1,				/* ref_pass_instance_number */
+	  PASS_POS_INSERT_AFTER		/* po_op */
+	};
+      register_pass (&insert_pass_mips_u64_check);
+    }
+
   if (TARGET_HARD_FLOAT_ABI && TARGET_MIPS5900)
     REAL_MODE_FORMAT (SFmode) = &spu_single_format;
 
@@ -22087,7 +22336,7 @@ mips_conditional_register_usage (void)
 	call_used_regs[regno] = 1;
     }
   /* Use AT as an additional temporary with u64 ABI. */
-    if (mips_abi == ABI_U64)
+    if (TARGET_UABI)
       fixed_regs[AT_REGNUM] = 0;
   /* Make sure that double-register accumulator values are correctly
      ordered for the current endianness.  */
@@ -22173,7 +22422,7 @@ mips_need_noat_wrapper_p (rtx_insn *insn, rtx *opvec, int noperands)
 static bool
 mips_need_nomacro_wrapper_p (rtx_insn *insn)
 {
-  if (mips_abi != ABI_U64)
+  if (!TARGET_UABI)
     return false;
 
   /* The U64 ABI allocates $at as a temporary register. Disable macros
@@ -24666,6 +24915,10 @@ mips_print_patchable_function_entry (FILE *file ATTRIBUTE_UNUSED,
 #undef TARGET_MODES_TIEABLE_P
 #define TARGET_MODES_TIEABLE_P mips_modes_tieable_p
 
+#undef TARGET_FNTYPE_ABI
+#define TARGET_FNTYPE_ABI mips_fntype_abi
+#undef TARGET_INSN_CALLEE_ABI
+#define TARGET_INSN_CALLEE_ABI mips_insn_callee_abi
 #undef TARGET_HARD_REGNO_CALL_PART_CLOBBERED
 #define TARGET_HARD_REGNO_CALL_PART_CLOBBERED \
   mips_hard_regno_call_part_clobbered

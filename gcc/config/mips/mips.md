@@ -8029,7 +8029,7 @@
    (set (match_operand 4 "register_operand" "")
 	(call (mem:SI (match_dup 1))
 	      (match_dup 2)))]
-  "TARGET_SIBCALLS && SIBLING_CALL_P (insn) && mips_abi == ABI_U64"
+  "TARGET_SIBCALLS && SIBLING_CALL_P (insn) && TARGET_UABI"
   { return mips_output_jump (operands, 1, 2, false); }
   [(set_attr "jal" "indirect,direct")
    (set_attr "jal_macro" "no")])
@@ -8047,7 +8047,7 @@
    (set (match_operand 5 "register_operand" "")
 	(call (mem:SI (match_dup 1))
 	      (match_dup 2)))]
-  "TARGET_SIBCALLS && SIBLING_CALL_P (insn) && mips_abi == ABI_U64"
+  "TARGET_SIBCALLS && SIBLING_CALL_P (insn) && TARGET_UABI"
   { return mips_output_jump (operands, 1, 2, false); }
   [(set_attr "jal" "indirect,direct")
    (set_attr "jal_macro" "no")])
@@ -8287,7 +8287,7 @@
 	(call (mem:SI (match_dup 1))
 	      (match_dup 2)))
    (clobber (reg:SI RETURN_ADDR_REGNUM))]
-  "mips_abi == ABI_U64"
+  "TARGET_UABI"
   {
     return (TARGET_SPLIT_CALLS ? "#"
 	    : mips_output_jump (operands, 1, 2, true));
@@ -8315,7 +8315,7 @@
 	      (match_dup 2)))
    (clobber (reg:SI RETURN_ADDR_REGNUM))
    (clobber (reg:SI 28))]
-  "TARGET_SPLIT_CALLS && mips_abi == ABI_U64"
+  "TARGET_SPLIT_CALLS && TARGET_UABI"
   { return mips_output_jump (operands, 1, 2, true); }
   [(set_attr "jal" "indirect,direct")
    (set_attr "jal_macro" "no")])
@@ -8334,7 +8334,7 @@
 	(call (mem:SI (match_dup 1))
 	      (match_dup 2)))
    (clobber (reg:SI RETURN_ADDR_REGNUM))]
-  "mips_abi == ABI_U64"
+  "TARGET_UABI"
   {
     return (TARGET_SPLIT_CALLS ? "#"
 	    : mips_output_jump (operands, 1, 2, true));
@@ -8365,7 +8365,7 @@
 	      (match_dup 2)))
    (clobber (reg:SI RETURN_ADDR_REGNUM))
    (clobber (reg:SI 28))]
-  "TARGET_SPLIT_CALLS && mips_abi == ABI_U64"
+  "TARGET_SPLIT_CALLS && TARGET_UABI"
   { return mips_output_jump (operands, 1, 2, true); }
   [(set_attr "jal" "indirect,direct")
    (set_attr "jal_macro" "no")])

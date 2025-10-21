@@ -34,7 +34,8 @@ extern int target_flags_explicit;
 
 /* Which ABI to use.  ABI_32 (original 32, or o32), ABI_N32 (n32),
    ABI_64 (n64) are all defined by SGI.  ABI_O64 is o32 extended
-   to work on a 64-bit machine.  */
+   to work on a 64-bit machine. ABI_U64 and ABI_U32 are custom
+   embedded ABIs. */
 
 #define ABI_32  0
 #define ABI_N32 1
@@ -42,6 +43,7 @@ extern int target_flags_explicit;
 #define ABI_EABI 3
 #define ABI_O64  4
 #define ABI_U64  5
+#define ABI_U32  6
 
 enum mips_isa {
   MIPS_ISA_MIPS1 = 1,
@@ -392,6 +394,7 @@ struct mips_cpu_info {
 
 #define TARGET_OLDABI		    (mips_abi == ABI_32 || mips_abi == ABI_O64)
 #define TARGET_NEWABI		    (mips_abi == ABI_N32 || mips_abi == ABI_64)
+#define TARGET_UABI		    (mips_abi == ABI_U32 || mips_abi == ABI_U64)
 
 /* TARGET_HARD_FLOAT and TARGET_SOFT_FLOAT reflect whether the FPU is
    directly accessible, while the command-line options select
@@ -682,8 +685,12 @@ struct mips_cpu_info {
 									\
       if (mips_abi == ABI_EABI)						\
 	builtin_define ("__mips_eabi");					\
+      if (mips_abi == ABI_U64 || mips_abi == ABI_U32)			\
+	builtin_define ("__mips_uabi");					\
       if (mips_abi == ABI_U64)						\
 	builtin_define ("__mips_u64");					\
+      if (mips_abi == ABI_U32)						\
+	builtin_define ("__mips_u32");					\
 									\
       if (TARGET_CACHE_BUILTIN)						\
 	builtin_define ("__GCC_HAVE_BUILTIN_MIPS_CACHE");		\
@@ -793,6 +800,8 @@ struct mips_cpu_info {
 #define MULTILIB_ABI_DEFAULT "mabi=eabi"
 #elif MIPS_ABI_DEFAULT == ABI_U64
 #define MULTILIB_ABI_DEFAULT "mabi=u64"
+#elif MIPS_ABI_DEFAULT == ABI_U32
+#define MULTILIB_ABI_DEFAULT "mabi=u32"
 #endif
 
 #ifndef MULTILIB_DEFAULTS
@@ -983,14 +992,16 @@ struct mips_cpu_info {
 /* True if the ABI can only work with 64-bit integer registers.  We
    generally allow ad-hoc variations for TARGET_SINGLE_FLOAT, but
    otherwise floating-point registers must also be 64-bit.  */
-#define ABI_NEEDS_64BIT_REGS	(TARGET_NEWABI || mips_abi == ABI_O64 || mips_abi == ABI_U64)
+#define ABI_NEEDS_64BIT_REGS \
+  (TARGET_NEWABI || mips_abi == ABI_O64 || mips_abi == ABI_U64)
 
 /* Likewise for 32-bit regs.  */
-#define ABI_NEEDS_32BIT_REGS	(mips_abi == ABI_32)
+#define ABI_NEEDS_32BIT_REGS	(mips_abi == ABI_32 || mips_abi == ABI_U32)
 
 /* True if the file format uses 64-bit symbols.  At present, this is
    only true for n64, which uses 64-bit ELF.  */
-#define FILE_HAS_64BIT_SYMBOLS	(mips_abi == ABI_64)
+#define FILE_HAS_64BIT_SYMBOLS \
+  (mips_abi == ABI_64 || (mips_abi == ABI_U64 && TARGET_LONG64))
 
 /* True if symbols are 64 bits wide.  This is usually determined by
    the ABI's file format, but it can be overridden by -msym32.  Note that
@@ -1495,6 +1506,7 @@ struct mips_cpu_info {
 %{modd-spreg} %{mno-odd-spreg} \
 %{mshared} %{mno-shared} \
 %{msym32} %{mno-sym32} \
+%{mlong32} %{mlong64} \
 %{mtune=*}" \
 FP_ASM_SPEC "\
 %{mmips16e2} \
@@ -2472,9 +2484,9 @@ enum reg_class
 
 /* Symbolic macros for the first/last argument registers.  */
 
-#define GP_ARG_FIRST (GP_REG_FIRST + (mips_abi == ABI_U64 ? 2 : 4))
+#define GP_ARG_FIRST (GP_REG_FIRST + (TARGET_UABI ? 2 : 4))
 #define GP_ARG_LAST  (GP_ARG_FIRST + MAX_ARGS_IN_REGISTERS - 1)
-#define FP_ARG_FIRST (mips_abi != ABI_U64 ? (FP_REG_FIRST + 12) : (FP_REG_FIRST + 0))
+#define FP_ARG_FIRST (!TARGET_UABI ? (FP_REG_FIRST + 12) : (FP_REG_FIRST + 0))
 #define FP_ARG_LAST  (FP_ARG_FIRST + MAX_ARGS_IN_REGISTERS - 1)
 
 /* True if MODE is vector and supported in a MSA vector register.  */
@@ -2570,7 +2582,7 @@ typedef struct mips_args {
    For a library call, FNTYPE is 0.  */
 
 #define INIT_CUMULATIVE_ARGS(CUM, FNTYPE, LIBNAME, INDIRECT, N_NAMED_ARGS) \
-  mips_init_cumulative_args (&CUM, FNTYPE)
+  mips_init_cumulative_args (&CUM, FNTYPE, LIBNAME)
 
 #define BLOCK_REG_PADDING(MODE, TYPE, FIRST) \
   (mips_pad_reg_upward (MODE, TYPE) ? PAD_UPWARD : PAD_DOWNWARD)
@@ -3450,6 +3462,9 @@ struct GTY(())  machine_function {
 
   /* 'true' - if current function is a naked function.  */
   bool is_naked;
+
+  /* 't' or 'x' if using a U64 ABI extension.  */
+  char u64_ext;
 
   /* 'true' if the above is_foo predicates are sanity-checked to avoid
      multiple diagnose for the same function.  */

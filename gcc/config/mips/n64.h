@@ -33,13 +33,16 @@ along with GCC; see the file COPYING3.  If not see
 	"%{!mabi=*:-mabi=u64}",						\
 									\
 	/* Make -mlong32 -msym32 default for all ABIs except n64. */	\
-	"%{!mabi=64:%{!mlong*:-mlong32} %{!mno-sym32:%{!msym32:-msym32}}}",	\
-									\
+	"%{!mabi=64:%{!mabi=u64:%{!mlong*:-mlong32}}}",			\
+	"%{!mabi=64:%{!mabi=u64:%{!mno-sym32:%{!msym32:-msym32}}}}",	\
+	"%{mabi=u64:%{mlong64:%{!mno-sym32:%{!msym32:-mno-sym32}}}}",	\
+
 	/* Make -mabicalls default for position-independent code.  */	\
 	"%{" FPIE_OR_FPIC_SPEC ":%{!mabi=eabi:-mabicalls}}",			\
 									\
 	/* Remove -mgp32 if it is redundant.  */			\
 	"%{mabi=32:%<mgp32}",						\
+	"%{mabi=u32:%<mgp32}",						\
 									\
 	/* Configuration-independent MIPS rules.  */			\
 	BASE_DRIVER_SELF_SPECS
