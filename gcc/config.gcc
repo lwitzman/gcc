@@ -2850,16 +2850,26 @@ mips64-*-elf* | mips64el-*-elf*)
 mips64vr-n64-elf)
         tm_file="elfos.h newlib-stdint.h ${tm_file} mips/n64.h mips/elf.h"
         tmake_file=mips/t-n64
-	case ${with_abi} in
-                ""|u64)  tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_U64" ;;
-                32)      tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_32" ;;
-                n32)     tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_N32" ;;
-                o64)     tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_O64" ;;
-                eabi)    tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_EABI" ;;
+        case ${with_abi} in
+                ""|u64)
+                        tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_U64"
+                        ;;
+                32)
+                        tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_32"
+                        ;;
+                n32)
+                        tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_N32"
+                        ;;
+                o64)
+                        tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_O64"
+                        ;;
+                eabi)
+                        tm_defines="${tm_defines} MIPS_ABI_DEFAULT=ABI_EABI"
+                        ;;
                 *)
-                echo "Unknown ABI used in --with-abi=$with_abi" 1>&2
-                exit 1
-                ;;
+                        echo "Unknown ABI used in --with-abi=$with_abi" 1>&2
+                        exit 1
+                        ;;
         esac
         ;;
 mips64vr-*-elf* | mips64vrel-*-elf*)
