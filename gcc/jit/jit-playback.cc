@@ -3555,7 +3555,7 @@ invoke_driver (const char *ctxt_progname,
 
   ADD_ARG (gcc_driver_name);
 
-  add_multilib_driver_arguments (&argvec);
+  // add_multilib_driver_arguments (&argvec);
 
   if (shared)
     ADD_ARG ("-shared");
